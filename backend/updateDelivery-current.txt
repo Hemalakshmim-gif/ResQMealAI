@@ -1,0 +1,275 @@
+const updateDelivery = async (req, res) => {
+  let claimedDriverId = null;
+
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid delivery ID"
+      });
+    }
+
+    const allowedFields = [
+      "status",
+      "notes",
+      "failureReason",
+      "plannedPickupAt"
+    ];
+
+    const updates = {};
+
+    for (const field of allowedFields) {
+      if (Object.prototype.hasOwnProperty.call(req.body, field)) {
+        updates[field] = req.body[field];
+      }
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Provide at least one valid field to update"
+      });
+    }
+
+    const currentDelivery = await Delivery.findById(id);
+
+    if (!currentDelivery) {
+      return res.status(404).json({
+        success: false,
+        message: "Delivery not found"
+      });
+    }
+
+    const allowedTransitions = {
+      pending: ["assigned", "cancelled", "failed"],
+      assigned: ["picked_up", "cancelled", "failed"],
+      picked_up: ["in_transit", "delivered", "failed"],
+      in_transit: ["delivered", "failed"],
+      failed: ["pending", "assigned", "cancelled"],
+      delivered: [],
+      cancelled: []
+    };
+
+    if (updates.status) {
+      const currentStatus = currentDelivery.status;
+
+      if (
+        !allowedTransitions[currentStatus]?.includes(updates.status)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot change delivery status from ${currentStatus} to ${updates.status}`
+        });
+      }
+
+      if (updates.status === "picked_up") {
+        updates.pickedUpAt = new Date();
+      }
+
+      if (updates.status === "delivered") {
+        updates.deliveredAt = new Date();
+      }
+
+      if (
+        updates.status === "failed" &&
+        !(
+          typeof updates.failureReason === "string" &&
+          updates.failureReason.trim()
+        ) &&
+        !(
+          typeof currentDelivery.failureReason === "string" &&
+          currentDelivery.failureReason.trim()
+        )
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Provide a failureReason when marking delivery as failed"
+        });
+      }
+
+      // An assigned delivery must have a linked driver.
+      if (updates.status === "assigned" && !currentDelivery.driver) {
+        return res.status(400).json({
+          success: false,
+          message: "Cannot assign this delivery because it has no linked driver"
+        });
+      }
+    }
+
+    // Validate donation transitions before changing delivery status.
+    let linkedDonation = null;
+
+    if (
+      updates.status === "picked_up" ||
+      updates.status === "delivered"
+    ) {
+      linkedDonation = await Donation.findById(
+        currentDelivery.donation
+      );
+
+      if (!linkedDonation) {
+        return res.status(409).json({
+          success: false,
+          message: "Linked donation not found"
+        });
+      }
+
+      if (
+        updates.status === "picked_up" &&
+        !["accepted", "preparing", "picked_up"].includes(
+          linkedDonation.status
+        )
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot mark delivery as picked up while donation status is '${linkedDonation.status}'`
+        });
+      }
+
+      if (
+        updates.status === "delivered" &&
+        !["picked_up", "delivered"].includes(linkedDonation.status)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot complete delivery while donation status is '${linkedDonation.status}'`
+        });
+      }
+    }
+
+    // Claim the linked driver when assigning or reassigning a delivery.
+    if (updates.status === "assigned") {
+      const claimedDriver = await Driver.findOneAndUpdate(
+        {
+          _id: currentDelivery.driver,
+          status: "available"
+        },
+        {
+          $set: { status: "assigned" }
+        },
+        {
+          returnDocument: "after",
+          runValidators: true
+        }
+      );
+
+      if (!claimedDriver) {
+        const existingDriver = await Driver.findById(
+          currentDelivery.driver
+        );
+
+        if (!existingDriver) {
+          return res.status(404).json({
+            success: false,
+            message: "Linked driver not found"
+          });
+        }
+
+        return res.status(400).json({
+          success: false,
+          message: "Linked driver is not available for reassignment"
+        });
+      }
+
+      claimedDriverId = claimedDriver._id;
+    }
+
+    let delivery;
+
+    try {
+      delivery = await Delivery.findByIdAndUpdate(
+        id,
+        { $set: updates },
+        {
+          returnDocument: "after",
+          runValidators: true
+        }
+      );
+
+      if (!delivery) {
+        throw new Error("Delivery not found during update");
+      }
+    } catch (error) {
+      // Release a newly claimed driver if the delivery update fails.
+      if (claimedDriverId) {
+        await Driver.findOneAndUpdate(
+          {
+            _id: claimedDriverId,
+            status: "assigned"
+          },
+          {
+            $set: { status: "available" }
+          }
+        );
+
+        claimedDriverId = null;
+      }
+
+      throw error;
+    }
+
+    // Synchronize the linked donation with delivery progress.
+    if (
+      linkedDonation &&
+      updates.status === "picked_up"
+    ) {
+      if (linkedDonation.status === "accepted") {
+        linkedDonation.status = "preparing";
+        await linkedDonation.save();
+      }
+
+      if (linkedDonation.status === "preparing") {
+        linkedDonation.status = "picked_up";
+        await linkedDonation.save();
+      }
+    }
+
+    if (
+      linkedDonation &&
+      updates.status === "delivered"
+    ) {
+      if (linkedDonation.status === "picked_up") {
+        linkedDonation.status = "delivered";
+        linkedDonation.deliveredAt = new Date();
+        await linkedDonation.save();
+      }
+    }
+
+    // Release the linked driver when a delivery ends or fails.
+    if (
+      ["delivered", "cancelled", "failed"].includes(updates.status) &&
+      currentDelivery.driver
+    ) {
+      await Driver.findOneAndUpdate(
+        {
+          _id: currentDelivery.driver,
+          status: "assigned"
+        },
+        {
+          $set: { status: "available" }
+        }
+      );
+    }
+
+    // Fetch fresh populated data so the response shows current driver status.
+    const result = await Delivery.findById(delivery._id)
+      .populate("donation")
+      .populate("driver");
+
+    return res.status(200).json({
+      success: true,
+      message: "Delivery updated successfully",
+      data: result
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Could not update delivery",
+      error: error.message
+    });
+  }
+};
+
+

@@ -1,0 +1,226 @@
+
+/* =========================================
+   ResQMeal AI — Neumorphic Theme
+   File: src/App.css
+   ========================================= */
+
+:root {
+  /* Brand colors */
+  --primary-green: #166534;
+  --emerald-accent: #16A34A;
+  --light-green: #DCFCE7;
+
+  /* Neumorphic background */
+  --page-bg: #E9EEE9;
+  --card-bg: #E9EEE9;
+
+  /* Text */
+  --text-primary: #17211B;
+  --text-secondary: #56645A;
+
+  /* Borders and status colors */
+  --border-color: #D5DDD5;
+  --warning-amber: #D97706;
+  --critical-red: #DC2626;
+  --info-blue: #2563EB;
+
+  /* Rounded corners */
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 20px;
+
+  /* Soft raised shadows */
+  --shadow-subtle:
+    4px 4px 10px #CBD2CB,
+    -4px -4px 10px #FFFFFF;
+
+  --shadow-card:
+    8px 8px 18px #CBD2CB,
+    -8px -8px 18px #FFFFFF;
+
+  /* Pressed / inset shadows */
+  --shadow-inset:
+    inset 4px 4px 8px #CBD2CB,
+    inset -4px -4px 8px #FFFFFF;
+}
+
+/* ---------- Global reset ---------- */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+}
+
+body {
+  background: var(--page-bg);
+  color: var(--text-primary);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+}
+
+/* ---------- Application layout ---------- */
+
+.nourivya-app {
+  display: flex;
+  min-height: 100vh;
+  background: var(--page-bg);
+  color: var(--text-primary);
+}
+
+/* ---------- Reusable Neumorphic surfaces ---------- */
+
+/* Add nm-surface to an element when appropriate. */
+.nm-surface {
+  background: var(--card-bg);
+  border: 1px solid rgba(255, 255, 255, 0.65);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+}
+
+/* Add nm-inset to recessed elements when appropriate. */
+.nm-inset {
+  background: var(--page-bg);
+  border: 1px solid rgba(203, 210, 203, 0.35);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-inset);
+}
+
+/* ---------- Keyboard accessibility ---------- */
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid var(--emerald-accent);
+  outline-offset: 3px;
+}
+
+/* ---------- Toast notifications ---------- */
+
+.toast-container {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 9999;
+
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+
+  max-width: calc(100vw - 32px);
+}
+
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+
+  padding: 14px 20px;
+  border-radius: var(--radius-md);
+
+  background: #26332A;
+  color: #FFFFFF;
+
+  box-shadow: 6px 6px 14px rgba(28, 39, 30, 0.18);
+
+  font-size: 14px;
+  line-height: 1.5;
+
+  animation: slideIn 0.3s ease;
+}
+
+.toast.success {
+  background: var(--primary-green);
+  border-left: 5px solid var(--emerald-accent);
+}
+
+.toast.error {
+  background: var(--critical-red);
+  border-left: 5px solid #FF8080;
+}
+
+.toast.warning {
+  background: var(--warning-amber);
+  border-left: 5px solid #FFE066;
+}
+
+/* ---------- Toast animation ---------- */
+
+@keyframes slideIn {
+  from {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+/* ---------- Scrollbar ---------- */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--page-bg);
+}
+
+::-webkit-scrollbar-thumb {
+  background: #B8C4B8;
+  border: 2px solid var(--page-bg);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #8D9D8D;
+}
+
+/* ---------- Responsive notifications ---------- */
+
+@media (max-width: 768px) {
+  .toast-container {
+    right: 12px;
+    bottom: 12px;
+    left: 12px;
+    max-width: none;
+  }
+
+  .toast {
+    padding: 12px 14px;
+  }
+}
+
+/* ---------- Reduced motion accessibility ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    animation: none;
+  }
+}
