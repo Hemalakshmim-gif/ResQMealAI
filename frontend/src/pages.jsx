@@ -1,15 +1,9 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { 
-  Leaf, ShieldCheck, Truck, BarChart3, Users, Bell, Search, Settings, 
-  ChevronRight, ArrowRight, Menu, X, Plus, Filter, AlertTriangle, CheckCircle2, 
-  Clock, MapPin, Activity, RefreshCw, Eye, Edit, Trash2, Send, Check, 
-  User, LogOut, Lock, Mail, Phone, Building, Globe, Zap, Database, Cpu, 
-  Layers, ArrowUpRight, TrendingUp, AlertCircle, Play, Download, HelpCircle,
-  CheckSquare, XCircle, Compass, Radio, Server
+  Truck, Users, Plus, CheckCircle2, MapPin, RefreshCw, Building, Database, Cpu, Layers, TrendingUp
 } from 'lucide-react';
 import { 
-  ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, 
-  BarChart, Bar, PieChart, Pie, Cell, CartesianGrid, Legend 
+  ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid
 } from 'recharts';
 
 import {
@@ -21,7 +15,6 @@ import {
   getFoodSafetyAnalysis,
   submitFoodSafetyReview,
   getInventory,
-  getDonations,
   updateDonation,
   getSettings,
   updateSettings,
@@ -68,51 +61,6 @@ useEffect(() => {
   };
 }, []);
   
-const [impact, setImpact] = useState(null);
-const [impactLoading, setImpactLoading] = useState(true);
-const [impactError, setImpactError] = useState(false);
-
-useEffect(() => {
-  let cancelled = false;
-
-  async function loadImpact() {
-    try {
-      const response = await fetch(
-        'http://localhost:5000/api/analytics/impact'
-      );
-
-      if (!response.ok) {
-        throw new Error('Failed to load impact metrics');
-      }
-
-      const result = await response.json();
-
-      if (!result.success) {
-        throw new Error('Analytics request was unsuccessful');
-      }
-
-      if (!cancelled) {
-        setImpact(result.data);
-        setImpactError(false);
-      }
-    } catch (error) {
-      if (!cancelled) {
-        setImpactError(true);
-      }
-    } finally {
-      if (!cancelled) {
-        setImpactLoading(false);
-      }
-    }
-  }
-
-  loadImpact();
-
-  return () => {
-    cancelled = true;
-  };
-}, []);
-
   return (
     <div style={{ width: '100vw', height: '100vh', overflowY: 'auto', background: 'var(--page-bg)' }}>
       <nav style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '20px 60px', background: '#FFFFFF', borderBottom: '1px solid var(--border-color)', position: 'sticky', top: 0, zIndex: 100 }}>
@@ -846,7 +794,7 @@ export function RegisterPage({ navigate, addToast }) {
   );
 }
 
-export function AdminDashboard({ appData, setAppData, addToast, navigate }) {
+export function AdminDashboard({ appData, addToast, navigate }) {
   const chartData = [
     { day: 'Mon', rescued: 120, predicted: 140 },
     { day: 'Tue', rescued: 190, predicted: 180 },
@@ -950,7 +898,7 @@ export function AdminDashboard({ appData, setAppData, addToast, navigate }) {
   );
 }
 
-export function ProviderDashboard({ appData, setAppData, addToast, navigate }) {
+export function ProviderDashboard({ appData, navigate }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '28px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1613,7 +1561,7 @@ export function PredictionsPage({ addToast }) {
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState('');
 
-  const runPrediction = async () => {
+  const runPrediction = useCallback(async () => {
     try {
       setLoading(true);
       setError('');
@@ -1645,11 +1593,59 @@ export function PredictionsPage({ addToast }) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [addToast]);
 
   React.useEffect(() => {
-    runPrediction();
-  }, []);
+    let cancelled = false;
+
+    const loadPrediction = async () => {
+      try {
+        setLoading(true);
+        setError('');
+
+        const baseUrl =
+          import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000';
+
+        const response = await fetch(
+          `${baseUrl}/api/agents/inventory-surplus/analyze`
+        );
+
+        const result = await response.json();
+
+        if (!response.ok || !result.success) {
+          throw new Error(
+            result.message || 'Unable to analyze inventory.'
+          );
+        }
+
+        if (!cancelled) {
+          setAnalysis(result.data);
+        }
+
+        if (!cancelled) {
+          addToast(
+            'Inventory surplus analysis completed successfully.',
+            'success'
+          );
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(err.message || 'Could not load inventory analysis.');
+          addToast('Inventory analysis failed.', 'error');
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void loadPrediction();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [addToast]);
 
   const recommendations = analysis?.recommendations || [];
 
@@ -1955,7 +1951,7 @@ export function PredictionsPage({ addToast }) {
 
 
 
-export function SafetyPage({ appData, addToast }) {
+export function SafetyPage({ addToast }) {
   const [safetyResults, setSafetyResults] = useState([]);
   const [loading, setLoading] = useState(true);
   const [savingFoodId, setSavingFoodId] = useState(null);
@@ -1986,8 +1982,38 @@ export function SafetyPage({ appData, addToast }) {
   };
 
   useEffect(() => {
-    loadSafetyResults();
-  }, []);
+    let cancelled = false;
+
+    const fetchSafetyResults = async () => {
+      try {
+        const response = await getFoodSafetyAnalysis();
+        if (!response.success || !Array.isArray(response.data)) {
+          throw new Error('Invalid food safety response.');
+        }
+
+        if (!cancelled) {
+          setSafetyResults(response.data);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          addToast(
+            error.message || 'Could not load food safety results.',
+            'error'
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void fetchSafetyResults();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [addToast]);
 
   const selectedFood = safetyResults.find(
     (food) => food.id === selectedFoodId
@@ -2666,7 +2692,7 @@ export function RecipientRequirements({ addToast }) {
   );
 }
 
-export function MatchingPage({ appData, addToast }) {
+export function MatchingPage() {
   const [matches, setMatches] = React.useState([]);
   const [summary, setSummary] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
@@ -2934,7 +2960,7 @@ export function DonationsPage({ appData, setAppData, addToast, navigate }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [addToast]);
 
   const selectedFood = foods.find(food => food._id === foodId);
   const selectedOrganization = organizations.find(
@@ -3190,6 +3216,7 @@ export function DonationDetailView({
 }) {
   const id = currentRoute.split('/')[2];
   const donation = appData.donations.find(d => d.id === id);
+  const [updatingStatus, setUpdatingStatus] = useState(false);
 
   if (!donation) {
     return (
@@ -3215,8 +3242,6 @@ export function DonationDetailView({
   }
 
   const status = String(donation.status || 'pending').toLowerCase();
-  
-  const [updatingStatus, setUpdatingStatus] = useState(false);
 
   const nextStatus = {
     pending: { value: 'accepted', label: 'Accept Donation' },
@@ -3370,7 +3395,7 @@ export function DonationDetailView({
             marginLeft: '10px',
           }}
         >
-          {stages.map((stage, index) => (
+          {stages.map((stage) => (
             <div key={stage.step} style={{ position: 'relative' }}>
               <span
                 style={{
@@ -3409,7 +3434,7 @@ export function DonationDetailView({
 }
 
 
-export function LogisticsPage({ appData, setAppData, addToast,navigate }) {
+export function LogisticsPage({ appData, navigate }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '28px' }}>
       <div>
@@ -3601,7 +3626,7 @@ export function AgentActivityPage({ appData }) {
 }
 
 
-export function MonitoringPage({ appData, setAppData, addToast }) {
+export function MonitoringPage({ setAppData }) {
   const [incidents, setIncidents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -3720,7 +3745,7 @@ export function MonitoringPage({ appData, setAppData, addToast }) {
 }
 
 
-export function ReplanningCenter({ appData, setAppData, addToast }) {
+export function ReplanningCenter({ addToast }) {
   const [proposals, setProposals] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -4111,7 +4136,7 @@ export function ReplanningCenter({ appData, setAppData, addToast }) {
   );
 }
 
-export function AnalyticsPage({ appData }) {
+export function AnalyticsPage() {
   const [analytics, setAnalytics] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -4286,38 +4311,49 @@ export function AnalyticsPage({ appData }) {
   );
 }
 
-export function NotificationsPage({ appData, setAppData, addToast }) {
+export function NotificationsPage({ setAppData, addToast }) {
   const [notifications, setNotifications] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  const loadNotifications = async () => {
+  const loadNotifications = useCallback(async () => {
     try {
-      setError("");
+      setError('');
       const response = await getNotifications();
 
       if (!response.success) {
-        throw new Error("Could not load notifications.");
+        throw new Error('Could not load notifications.');
       }
 
       const items = response.data || [];
       setNotifications(items);
-
-      // Keep the existing app-wide notification badge in sync.
       setAppData(prev => ({
         ...prev,
-        notifications: items
+        notifications: items,
       }));
     } catch (err) {
-      setError(err.message || "Could not load notifications.");
+      setError(err.message || 'Could not load notifications.');
     } finally {
       setLoading(false);
     }
-  };
+  }, [setAppData]);
 
   useEffect(() => {
-    loadNotifications();
-  }, []);
+    let cancelled = false;
+
+    const fetchNotifications = async () => {
+      await loadNotifications();
+      if (cancelled) {
+        return;
+      }
+    };
+
+    void fetchNotifications();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [loadNotifications]);
 
   const markAllRead = async () => {
     try {
@@ -4537,7 +4573,7 @@ export function NotificationsPage({ appData, setAppData, addToast }) {
 export function SettingsPage({ user, setCurrentUser, addToast }) {
   const storageKey = 'resqmealai-settings';
 
-  const defaults = {
+  const defaults = useMemo(() => ({
     profile: {
       name: user?.name || '',
       email: user?.email || '',
@@ -4557,9 +4593,9 @@ export function SettingsPage({ user, setCurrentUser, addToast }) {
       pickupTime: 'Any time',
       serviceRadius: 10
     }
-  };
+  }), [user?.email, user?.name, user?.org]);
 
-  const mergeSettings = (parsed = {}) => ({
+  const mergeSettings = useCallback((parsed = {}) => ({
     ...defaults,
     ...parsed,
     profile: { ...defaults.profile, ...parsed.profile },
@@ -4572,7 +4608,7 @@ export function SettingsPage({ user, setCurrentUser, addToast }) {
       ...parsed.appearance
     },
     food: { ...defaults.food, ...parsed.food }
-  });
+  }), [defaults]);
 
   const loadSavedSettings = () => {
     try {
@@ -4656,7 +4692,7 @@ document.body.dataset.layoutDensity = loaded.appearance.density;
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [addToast, mergeSettings, user?.email, user?.name, user?.org]);
 
   const updateSection = (section, field, value) => {
     setSettings(previous => ({
@@ -5085,4 +5121,3 @@ setCurrentUser(previous => ({
     </div>
   );
 }
-
