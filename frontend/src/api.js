@@ -5,15 +5,24 @@ const API_BASE_URL =
 
 async function apiRequest(path, options = {}) {
   const token = localStorage.getItem("nourivya-token");
+  const isDriverRequest =
+    path.startsWith("/api/driver-deliveries") ||
+    path === "/api/driver-auth/availability";
 
   const headers = {
     "Content-Type": "application/json",
     ...options.headers
   };
 
-  // Send the JWT with protected settings requests.
-  if (path.startsWith("/api/settings") && token) {
-    headers.Authorization = `Bearer ${token}`;
+  // Organization authentication
+if (path.startsWith("/api/settings") && token) {
+  headers.Authorization = `Bearer ${token}`;
+}
+
+  // Driver credentials remain separate from organization credentials.
+  const driverToken = localStorage.getItem("nourivya-driver-token");
+  if (isDriverRequest && driverToken) {
+    headers.Authorization = `Bearer ${driverToken}`;
   }
 
   const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -22,6 +31,12 @@ async function apiRequest(path, options = {}) {
   });
 
   const result = await response.json().catch(() => ({}));
+
+  if (isDriverRequest && response.status === 401) {
+    localStorage.removeItem("nourivya-driver-token");
+    localStorage.removeItem("nourivya-driver-user");
+    window.dispatchEvent(new Event("nourivya-driver-session-expired"));
+  }
 
   if (!response.ok) {
     throw new Error(
@@ -152,3 +167,44 @@ export const loginOrganization = (credentials) =>
     body: JSON.stringify(credentials),
   });
 
+// ===============================
+// DRIVER AUTHENTICATION
+// ===============================
+
+export const registerDriver = (driverData) =>
+  apiRequest("/api/driver-auth/register", {
+    method: "POST",
+    body: JSON.stringify(driverData),
+  });
+
+export const loginDriver = (credentials) =>
+  apiRequest("/api/driver-auth/login", {
+    method: "POST",
+    body: JSON.stringify(credentials),
+  });
+
+
+// ===============================
+// DRIVER DELIVERY MANAGEMENT
+// ===============================
+
+export const getMyDeliveries = () =>
+  apiRequest("/api/driver-deliveries/my-deliveries");
+
+export const updateMyDeliveryStatus = (id, status) =>
+  apiRequest(`/api/driver-deliveries/${id}/status`, {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });
+
+export const cancelMyDelivery = (id, reason) =>
+  apiRequest(`/api/driver-deliveries/${id}/cancel`, {
+    method: "PATCH",
+    body: JSON.stringify({ reason }),
+  });
+
+export const updateMyAvailability = (status) =>
+  apiRequest("/api/driver-auth/availability", {
+    method: "PATCH",
+    body: JSON.stringify({ status }),
+  });

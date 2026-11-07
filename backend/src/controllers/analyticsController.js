@@ -8,7 +8,8 @@ const getImpactAnalytics = async (req, res) => {
     // Count delivered donations and sum quantities that are explicitly
     // measured in meals.
     const deliveredDonations = await Donation.find({
-      status: "delivered"
+      status: "delivered",
+      notes: { $not: /^driver-demo:/ }
     })
       .populate("food", "unit")
       .lean();
@@ -28,7 +29,8 @@ const getImpactAnalytics = async (req, res) => {
     const deliveryOutcomes = await Delivery.aggregate([
       {
         $match: {
-          status: { $in: ["delivered", "failed"] }
+          status: { $in: ["delivered", "failed"] },
+          notes: { $not: /^driver-demo:/ }
         }
       },
       {
@@ -56,10 +58,19 @@ const getImpactAnalytics = async (req, res) => {
 
     // Count active provider organizations using the organization schema.
     // Restaurant, hotel and supermarket are treated as provider types.
-    const activeProviderNetwork = await Organization.countDocuments({
-      isActive: true,
-      type: { $in: ["restaurant", "hotel", "supermarket"] }
-    });
+    const [activeProviderNetwork, activeRecipientOrganizations] =
+      await Promise.all([
+        Organization.countDocuments({
+          isActive: true,
+          demoSeedKey: { $exists: false },
+          type: { $in: ["restaurant", "hotel", "supermarket"] }
+        }),
+        Organization.countDocuments({
+          isActive: true,
+          demoSeedKey: { $exists: false },
+          type: { $in: ["ngo", "food_bank", "shelter"] }
+        })
+      ]);
 
     // We don't have a verified emissions factor or reliable food mass
     // for every unit, so do not invent a CO2 estimate.
@@ -69,6 +80,7 @@ const getImpactAnalytics = async (req, res) => {
         totalMealsRedistributed,
         deliveredDonationCount,
         activeProviderNetwork,
+        activeRecipientOrganizations,
         successfulDeliveryRate,
         successfulDeliveries: outcome.successful,
         deliveryOutcomes: outcome.total,

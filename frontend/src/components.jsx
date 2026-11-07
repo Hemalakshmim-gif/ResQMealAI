@@ -1,11 +1,7 @@
-import React from 'react';
 import { 
-  Leaf, ShieldCheck, Truck, BarChart3, Users, Bell, Search, Settings, 
-  ChevronRight, ArrowRight, Menu, X, Plus, Filter, AlertTriangle, CheckCircle2, 
-  Clock, MapPin, Activity, RefreshCw, Eye, Edit, Trash2, Send, Check, 
-  User, LogOut, Lock, Mail, Phone, Building, Globe, Zap, Database, Cpu, 
-  Layers, ArrowUpRight, TrendingUp, AlertCircle, Play, Download, HelpCircle,
-  CheckSquare, XCircle, Compass, Radio, Server
+  ShieldCheck, Truck, BarChart3, Users, Bell, Settings, Menu, MapPin,
+  Activity, User, LogOut, Building, Globe, Zap, Database, Cpu, Layers,
+  TrendingUp, Radio
 } from 'lucide-react';
 
 const getInitials = (name = '') =>
@@ -17,7 +13,7 @@ const getInitials = (name = '') =>
     .map(part => part[0].toUpperCase())
     .join('') || 'U';
     
-export function Sidebar({ currentRoute, navigate, collapsed, setCollapsed, userRole, user, unreadCount }) {
+export function Sidebar({ currentRoute, navigate, collapsed, setCollapsed, userRole, user, unreadCount, onLogout }) {
   const menuGroups = [
     {
       title: 'Overview',
@@ -53,11 +49,19 @@ export function Sidebar({ currentRoute, navigate, collapsed, setCollapsed, userR
         { label: 'Notifications', path: '/notifications', icon: Bell, badge: unreadCount, roles: ['admin', 'provider', 'recipient'] },
         { label: 'Settings', path: '/settings', icon: Settings, roles: ['admin', 'provider', 'recipient'] }
       ]
-    }
+    },
+    {
+  title: 'Driver Operations',
+  items: [
+    { label: 'Driver Dashboard', path: '/driver/dashboard', icon: Truck, roles: ['driver'] },
+    { label: 'My Deliveries', path: '/driver/deliveries', icon: MapPin, roles: ['driver'] },
+    { label: 'Driver Profile', path: '/driver/profile', icon: User, roles: ['driver'] }
+  ]
+},
   ];
 
   return (
-    <div style={{
+    <div className={userRole === 'driver' ? 'driver-sidebar' : undefined} style={{
       width: collapsed ? '80px' : '340px',
       minWidth: collapsed ? '88px' : '260px',
       flexShrink: 0,
@@ -231,7 +235,7 @@ export function Sidebar({ currentRoute, navigate, collapsed, setCollapsed, userR
         )}
         
 <button
-  onClick={() => navigate('/login')}
+  onClick={onLogout || (() => navigate('/login'))}
   title="Log out"
   style={{
     background: 'none',
@@ -255,7 +259,7 @@ export function Sidebar({ currentRoute, navigate, collapsed, setCollapsed, userR
 }
 
 
-export function Topbar({ currentRoute, navigate, user, userRole, setUserRole, searchQuery, setSearchQuery, unreadCount }) {
+export function Topbar({ currentRoute, navigate, user, userRole, setUserRole, unreadCount }) {
   const getPageTitle = () => {
     if (currentRoute === '/admin/dashboard') return 'Admin Operations Center';
     if (currentRoute === '/provider/dashboard') return 'Food Provider Dashboard';
@@ -273,11 +277,16 @@ export function Topbar({ currentRoute, navigate, user, userRole, setUserRole, se
     if (currentRoute === '/analytics') return 'Impact & Sustainability Analytics';
     if (currentRoute === '/notifications') return 'System Notifications';
     if (currentRoute === '/settings') return 'System & Account Settings';
+
+    if (currentRoute === '/driver/dashboard') return 'Driver Dashboard';
+    if (currentRoute === '/driver/deliveries') return 'My Deliveries';
+    if (currentRoute === '/driver/profile') return 'Driver Profile';
+
     return 'Dashboard';
   };
 
   return (
-    <div style={{
+    <div className={userRole === 'driver' ? 'driver-topbar' : undefined} style={{
       height: '70px',
       background: '#FFFFFF',
       borderBottom: '1px solid var(--border-color)',
@@ -287,63 +296,189 @@ export function Topbar({ currentRoute, navigate, user, userRole, setUserRole, se
       padding: '0 28px',
       zIndex: 5
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
+
+      {/* Page Title */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '20px'
+      }}>
         <div>
-          <h2 style={{ fontSize: '18px', fontWeight: '800', color: 'var(--text-primary)', letterSpacing: '-0.3px' }}>{getPageTitle()}</h2>
-          <p style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>ResQMeal AI — Rescue Food. Redirect Hope.</p>
+          <h2 style={{
+            fontSize: '18px',
+            fontWeight: '800',
+            color: 'var(--text-primary)',
+            letterSpacing: '-0.3px'
+          }}>
+            {getPageTitle()}
+          </h2>
+
+          <p style={{
+            fontSize: '12px',
+            color: 'var(--text-secondary)'
+          }}>
+            ResQMeal AI — Rescue Food. Redirect Hope.
+          </p>
         </div>
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', background: 'var(--page-bg)', padding: '6px 12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }}>
-          <span style={{ fontSize: '12px', fontWeight: '600', color: 'var(--text-secondary)' }}>Role:</span>
-          
-<select
-  value={userRole}
-  onChange={(e) => {
-    const role = e.target.value;
-    setUserRole(role);
+      {/* Right Side Controls */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '16px'
+      }}>
 
-    if (role === 'admin') navigate('/admin/dashboard');
-    else if (role === 'provider') navigate('/provider/dashboard');
-    else if (role === 'recipient') navigate('/recipient/dashboard');
-  }}
-  style={{
-    background: 'transparent',
-    border: 'none',
-    fontWeight: '700',
-    fontSize: '13px',
-    color: 'var(--primary-green)',
-    cursor: 'pointer',
-    outline: 'none'
-  }}
->
-  <option value="admin">Administrator</option>
-  <option value="provider">Food Provider</option>
-  <option value="recipient">Recipient NGO</option>
-</select>
+        {/* Role Switcher - Hidden for Drivers */}
+        {userRole !== 'driver' && (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            background: 'var(--page-bg)',
+            padding: '6px 12px',
+            borderRadius: 'var(--radius-sm)',
+            border: '1px solid var(--border-color)'
+          }}>
+            <span style={{
+              fontSize: '12px',
+              fontWeight: '600',
+              color: 'var(--text-secondary)'
+            }}>
+              Role:
+            </span>
 
-        </div>
+            <select
+              value={userRole}
+              onChange={(e) => {
+                const role = e.target.value;
+                if (role === 'driver') {
+                  navigate('/driver/login');
+                  return;
+                }
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', background: 'var(--light-green)', padding: '6px 12px', borderRadius: '20px' }}>
-          <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--emerald-accent)', display: 'inline-block', boxShadow: '0 0 8px var(--emerald-accent)' }}></span>
-          <span style={{ fontSize: '12px', fontWeight: '700', color: 'var(--primary-green)' }}>7 Agents Active</span>
-        </div>
+                setUserRole(role);
 
-        <button onClick={() => navigate('/notifications')} style={{ position: 'relative', background: 'none', border: '1px solid var(--border-color)', borderRadius: '50%', width: '38px', height: '38px', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer', color: 'var(--text-secondary)' }}>
+                if (role === 'admin') navigate('/admin/dashboard');
+                else if (role === 'provider') navigate('/provider/dashboard');
+                else if (role === 'recipient') navigate('/recipient/dashboard');
+              }}
+              style={{
+                background: 'transparent',
+                border: 'none',
+                fontWeight: '700',
+                fontSize: '13px',
+                color: 'var(--primary-green)',
+                cursor: 'pointer',
+                outline: 'none'
+              }}
+            >
+              <option value="admin">Administrator</option>
+              <option value="provider">Food Provider</option>
+              <option value="recipient">Recipient NGO</option>
+              <option value="driver">Delivery Driver</option>
+            </select>
+          </div>
+        )}
+
+        {/* Agent Status */}
+        {userRole !== 'driver' && <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px',
+          background: 'var(--light-green)',
+          padding: '6px 12px',
+          borderRadius: '20px'
+        }}>
+          <span style={{
+            width: '8px',
+            height: '8px',
+            borderRadius: '50%',
+            background: 'var(--emerald-accent)',
+            display: 'inline-block',
+            boxShadow: '0 0 8px var(--emerald-accent)'
+          }} />
+
+          <span style={{
+            fontSize: '12px',
+            fontWeight: '700',
+            color: 'var(--primary-green)'
+          }}>
+            7 Agents Active
+          </span>
+        </div>}
+
+        {/* Notifications */}
+        {userRole !== 'driver' && (
+        <button
+          onClick={() => navigate('/notifications')}
+          style={{
+            position: 'relative',
+            background: 'none',
+            border: '1px solid var(--border-color)',
+            borderRadius: '50%',
+            width: '38px',
+            height: '38px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'pointer',
+            color: 'var(--text-secondary)'
+          }}
+        >
           <Bell size={18} />
+
           {unreadCount > 0 && (
-            <span style={{ position: 'absolute', top: '2px', right: '2px', background: 'var(--critical-red)', color: '#fff', fontSize: '10px', width: '16px', height: '16px', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '700' }}>
+            <span style={{
+              position: 'absolute',
+              top: '2px',
+              right: '2px',
+              background: 'var(--critical-red)',
+              color: '#fff',
+              fontSize: '10px',
+              width: '16px',
+              height: '16px',
+              borderRadius: '50%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontWeight: '700'
+            }}>
               {unreadCount}
             </span>
           )}
         </button>
+        )}
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }} onClick={() => navigate('/settings')}>
-          <div style={{ width: '38px', height: '38px', borderRadius: '50%', background: 'var(--primary-green)', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: '700', fontSize: '14px' }}>
+        {/* Profile */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+            cursor: 'pointer'
+          }}
+          onClick={() =>
+            navigate(userRole === 'driver' ? '/driver/profile' : '/settings')
+          }
+          title="Open Profile"
+        >
+          <div style={{
+            width: '38px',
+            height: '38px',
+            borderRadius: '50%',
+            background: 'var(--primary-green)',
+            color: '#fff',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontWeight: '700',
+            fontSize: '14px'
+          }}>
             {getInitials(user?.name)}
           </div>
         </div>
+
       </div>
     </div>
   );

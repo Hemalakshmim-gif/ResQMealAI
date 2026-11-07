@@ -39,6 +39,29 @@ body {
   background: var(--page-bg);
 }
 
+.driver-main {
+  min-width: 0;
+}
+
+@media (max-width: 760px) {
+  .driver-app {
+    height: 100dvh;
+  }
+
+  .driver-sidebar {
+    flex-shrink: 0;
+  }
+
+  .driver-topbar {
+    flex-shrink: 0;
+    padding: 0 12px !important;
+  }
+
+  .driver-content {
+    min-width: 0;
+  }
+}
+
 /* ==============================
    RESQMEALAI APPEARANCE SETTINGS
    ============================== */

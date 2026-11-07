@@ -20,6 +20,8 @@ const analyticsRoutes = require("./src/routes/analyticsRoutes");
 const monitoringRoutes = require("./src/routes/monitoringRoutes");
 const replanningRoutes = require("./src/routes/replanningRoutes");
 const authRoutes = require("./src/routes/authRoutes");
+const driverAuthRoutes = require("./src/routes/driverAuthRoutes");
+const driverDeliveryRoutes = require("./src/routes/driverDeliveryRoutes");
 
 const app = express();
 
@@ -41,6 +43,8 @@ app.use("/api/analytics", analyticsRoutes);
 app.use("/api/monitoring", monitoringRoutes);
 app.use("/api/replanning", replanningRoutes);
 app.use("/api/auth", authRoutes);
+app.use("/api/driver-auth", driverAuthRoutes);
+app.use("/api/driver-deliveries", driverDeliveryRoutes);
 
 const PORT = process.env.PORT || 5000;
 

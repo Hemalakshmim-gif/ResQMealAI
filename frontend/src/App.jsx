@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { CheckCircle2, AlertTriangle, AlertCircle } from 'lucide-react';
 import { INITIAL_DATA } from './data.js';
 import { Sidebar, Topbar } from './components.jsx';
@@ -9,6 +9,11 @@ import {
   LogisticsPage, DeliveryTrackingView, AgentActivityPage, MonitoringPage,
   ReplanningCenter, AnalyticsPage, NotificationsPage, SettingsPage
 } from './pages.jsx';
+import {
+  DriverDashboard,
+  DriverDeliveriesPage,
+  DriverProfilePage
+} from './DriverPages.jsx';
 import './App.css';
 import {
   getInventory,
@@ -19,40 +24,46 @@ import {
   getNotifications,
 } from './api.js';
 
+const defaultUser = {
+  name: "Dr. Aris Thorne",
+  email: "aris.thorne@nourivya.org",
+  role: "System Administrator",
+  org: "ResQMeal AI Hub"
+};
+
+const readStoredUser = (key) => {
+  try {
+    const stored = localStorage.getItem(key);
+    return stored ? JSON.parse(stored) : null;
+  } catch {
+    return null;
+  }
+};
+
+const readStoredDriverSession = () => {
+  const driver = readStoredUser("nourivya-driver-user");
+  return localStorage.getItem("nourivya-driver-token") &&
+    driver?.role === "driver"
+    ? driver
+    : null;
+};
+
 function App() {
  const [currentRoute, setCurrentRoute] = useState(
   () => window.location.pathname || '/'
 );
-  const [currentUser, setCurrentUser] = useState(() => {
-  try {
-    const savedUser = localStorage.getItem("nourivya-user");
-    return savedUser ? JSON.parse(savedUser) : {
-      name: "Dr. Aris Thorne",
-      email: "aris.thorne@nourivya.org",
-      role: "System Administrator",
-      org: "ResQMeal AI Hub"
-    };
-  } catch {
-    return {
-      name: "Dr. Aris Thorne",
-      email: "aris.thorne@nourivya.org",
-      role: "System Administrator",
-      org: "ResQMeal AI Hub"
-    };
-  }
-});
+  const [currentUser, setCurrentUser] = useState(() =>
+    readStoredDriverSession() || readStoredUser("nourivya-user") || defaultUser
+  );
 
 const [userRole, setUserRole] = useState(() => {
-  const savedUser = (() => {
-    try {
-      return JSON.parse(localStorage.getItem("nourivya-user") || "null");
-    } catch {
-      return null;
-    }
-  })();
-
-  return savedUser?.role || currentUser.role || "admin";
+  const driver = readStoredDriverSession();
+  const savedUser = readStoredUser("nourivya-user");
+  return driver?.role || savedUser?.role || currentUser.role || "admin";
 });
+
+  const isDriverContext =
+    userRole === "driver" || currentRoute.startsWith("/driver/");
 
   
   useEffect(() => {
@@ -60,6 +71,8 @@ const [userRole, setUserRole] = useState(() => {
 
     async function loadSavedProfile() {
       try {
+        if (isDriverContext) return;
+
         // Don't load account settings without a saved login token.
         const token = localStorage.getItem("nourivya-token");
         if (!token) return;
@@ -124,9 +137,10 @@ const [userRole, setUserRole] = useState(() => {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isDriverContext]);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth <= 760);
   const [toasts, setToasts] = useState([]);
   const [appData, setAppData] = useState(INITIAL_DATA);
 
@@ -141,10 +155,40 @@ const [userRole, setUserRole] = useState(() => {
 };
 
   useEffect(() => {
+    const handleResize = () => setIsMobile(window.innerWidth <= 760);
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  useEffect(() => {
+    const handleDriverSessionExpired = () => {
+      localStorage.removeItem("nourivya-driver-token");
+      localStorage.removeItem("nourivya-driver-user");
+      const savedUser = readStoredUser("nourivya-user") || defaultUser;
+      setCurrentUser(savedUser);
+      setUserRole(savedUser.role || "admin");
+      window.history.replaceState({}, "", "/driver/login");
+      setCurrentRoute("/driver/login");
+      addToast("Your driver session expired. Please sign in again.", "error");
+    };
+
+    window.addEventListener(
+      "nourivya-driver-session-expired",
+      handleDriverSessionExpired
+    );
+    return () => window.removeEventListener(
+      "nourivya-driver-session-expired",
+      handleDriverSessionExpired
+    );
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function loadNotifications() {
       try {
+        if (isDriverContext) return;
+
         const response = await getNotifications();
 
         if (cancelled || !response.success) return;
@@ -163,7 +207,7 @@ const [userRole, setUserRole] = useState(() => {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isDriverContext]);
   const [searchQuery, setSearchQuery] = useState('');
   
   useEffect(() => {
@@ -171,6 +215,8 @@ const [userRole, setUserRole] = useState(() => {
 
   async function loadDonations() {
     try {
+      if (isDriverContext) return;
+
       const response = await getDonations();
 
       const donations = (response.data || []).map(donation => ({
@@ -205,13 +251,15 @@ const [userRole, setUserRole] = useState(() => {
   return () => {
     cancelled = true;
   };
-}, []);
+}, [isDriverContext]);
 
   useEffect(() => {
   let cancelled = false;
 
   async function loadInventory() {
     try {
+      if (isDriverContext) return;
+
       const response = await getInventory();
 
       const inventory = (response.data || []).map(food => ({
@@ -250,13 +298,15 @@ const [userRole, setUserRole] = useState(() => {
   return () => {
     cancelled = true;
   };
-}, []);
+}, [isDriverContext]);
 
   useEffect(() => {
   let cancelled = false;
 
   async function loadLogistics() {
     try {
+      if (isDriverContext) return;
+
       const [deliveryResponse, driverResponse] = await Promise.all([
         getDeliveries(),
         getDrivers(),
@@ -323,7 +373,7 @@ const [userRole, setUserRole] = useState(() => {
   return () => {
     cancelled = true;
   };
-}, []);
+}, [isDriverContext]);
 
   useEffect(() => 
     {
@@ -342,17 +392,61 @@ const [userRole, setUserRole] = useState(() => {
   };
 }, []);
 
-  const navigate = (route) => {
+  const navigate = useCallback((route) => {
   if (route !== window.location.pathname) {
     window.history.pushState({}, '', route);
   }
 
   setCurrentRoute(route);
   window.scrollTo(0, 0);
-};
+  }, []);
+
+  const handleLogout = () => {
+    if (userRole === "driver") {
+      localStorage.removeItem("nourivya-driver-token");
+      localStorage.removeItem("nourivya-driver-user");
+      const savedUser = readStoredUser("nourivya-user") || defaultUser;
+      setCurrentUser(savedUser);
+      setUserRole(savedUser.role || "admin");
+      navigate("/driver/login");
+      return;
+    }
+
+    navigate("/login");
+  };
+
+  useEffect(() => {
+    const isDriverPublicRoute = [
+      "/driver/login",
+      "/driver/register"
+    ].includes(currentRoute);
+    const isDriverPrivateRoute =
+      currentRoute.startsWith("/driver/") && !isDriverPublicRoute;
+    const driverSession = readStoredDriverSession();
+
+    if (isDriverPrivateRoute && !driverSession) {
+      queueMicrotask(() => navigate("/driver/login"));
+      return;
+    }
+
+    if (isDriverPrivateRoute && driverSession && userRole !== "driver") {
+      queueMicrotask(() => {
+        setCurrentUser(driverSession);
+        setUserRole("driver");
+      });
+      return;
+    }
+
+    if (
+      userRole === "driver" &&
+      (!currentRoute.startsWith("/driver/") || isDriverPublicRoute)
+    ) {
+      queueMicrotask(() => navigate("/driver/dashboard"));
+    }
+  }, [currentRoute, navigate, userRole]);
 
   return (
-    <div className="nourivya-app">
+    <div className={`nourivya-app${userRole === "driver" ? " driver-app" : ""}`}>
       
       <div className="toast-container">
         {toasts.map(t => (
@@ -375,20 +469,41 @@ const [userRole, setUserRole] = useState(() => {
   />
 )}
       {currentRoute === '/register' && <RegisterPage navigate={navigate} addToast={addToast} />}
+      {currentRoute === '/driver/login' && (
+        <LoginPage
+          navigate={navigate}
+          setUserRole={setUserRole}
+          setCurrentUser={setCurrentUser}
+          addToast={addToast}
+          initialRole="driver"
+        />
+      )}
+      {currentRoute === '/driver/register' && (
+        <RegisterPage
+          navigate={navigate}
+          addToast={addToast}
+          initialAccountType="driver"
+        />
+      )}
 
-      {currentRoute !== '/' && currentRoute !== '/login' && currentRoute !== '/register' && (
+      {currentRoute !== '/' &&
+        currentRoute !== '/login' &&
+        currentRoute !== '/register' &&
+        currentRoute !== '/driver/login' &&
+        currentRoute !== '/driver/register' && (
         <div style={{ display: 'flex', width: '100%', height: '100vh', overflow: 'hidden' }}>
           <Sidebar
   currentRoute={currentRoute}
   navigate={navigate}
-  collapsed={sidebarCollapsed}
+  collapsed={sidebarCollapsed || (userRole === "driver" && isMobile)}
   setCollapsed={setSidebarCollapsed}
   userRole={userRole}
   user={currentUser}
   unreadCount={appData.notifications.filter(n => !n.read).length}
+  onLogout={handleLogout}
 />
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: 'var(--page-bg)' }}>
-            <Topbar 
+  <div className={userRole === "driver" ? "driver-main" : undefined} style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: 'var(--page-bg)' }}>
+    <Topbar
               currentRoute={currentRoute} 
               navigate={navigate} 
               user={currentUser}
@@ -398,7 +513,7 @@ const [userRole, setUserRole] = useState(() => {
               setSearchQuery={setSearchQuery}
               unreadCount={appData.notifications.filter(n => !n.read).length}
             />
-            <div style={{ flex: 1, overflowY: 'auto', padding: '28px' }}>
+            <div className={userRole === "driver" ? "driver-content" : undefined} style={{ flex: 1, overflowY: 'auto', padding: isMobile && userRole === "driver" ? "14px" : "28px" }}>
               {currentRoute === '/admin/dashboard' && <AdminDashboard appData={appData} setAppData={setAppData} addToast={addToast} navigate={navigate} />}
               {currentRoute === '/provider/dashboard' && <ProviderDashboard appData={appData} setAppData={setAppData} addToast={addToast} navigate={navigate} />}
               {currentRoute === '/provider/inventory' && <InventoryPage appData={appData} setAppData={setAppData} addToast={addToast} />}
@@ -430,6 +545,22 @@ const [userRole, setUserRole] = useState(() => {
     addToast={addToast}
   />
 )}
+              {currentRoute === '/driver/dashboard' && (
+                <DriverDashboard user={currentUser} navigate={navigate} />
+              )}
+              {currentRoute === '/driver/deliveries' && (
+                <DriverDeliveriesPage
+                  user={currentUser}
+                  setUser={setCurrentUser}
+                />
+              )}
+              {currentRoute === '/driver/profile' && (
+                <DriverProfilePage
+                  user={currentUser}
+                  setUser={setCurrentUser}
+                  addToast={addToast}
+                />
+              )}
             </div>
           </div>
         </div>
@@ -439,4 +570,3 @@ const [userRole, setUserRole] = useState(() => {
 }
 
 export default App;
-

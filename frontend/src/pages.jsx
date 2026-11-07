@@ -12,6 +12,8 @@ import {
   createFood,
   getOrganizations,
   loginOrganization,
+  loginDriver,
+  registerDriver,
   getFoodSafetyAnalysis,
   submitFoodSafetyReview,
   getInventory,
@@ -26,40 +28,61 @@ import {
   approveReplanningProposal
 } from './api.js';
 
-export function LandingPage({ navigate }) {
+function useLiveImpactAnalytics() {
+  const [analytics, setAnalytics] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [refreshVersion, setRefreshVersion] = useState(0);
 
-const [analytics, setAnalytics] = useState(null);
-const [analyticsLoading, setAnalyticsLoading] = useState(true);
+  useEffect(() => {
+    let cancelled = false;
 
-useEffect(() => {
-  let cancelled = false;
+    async function loadAnalytics() {
+      try {
+        const response = await getImpactAnalytics();
 
-  async function loadAnalytics() {
-    try {
-      const response = await getImpactAnalytics();
+        if (!response.success || !response.data) {
+          throw new Error(response.message || "Could not load impact analytics.");
+        }
 
-      if (!response.success) {
-        throw new Error("Unable to load impact metrics.");
-      }
-
-      if (!cancelled) {
-        setAnalytics(response.data);
-      }
-    } catch (error) {
-      console.error("Landing page analytics error:", error);
-    } finally {
-      if (!cancelled) {
-        setAnalyticsLoading(false);
+        if (!cancelled) {
+          setAnalytics(response.data);
+          setError("");
+          setLastUpdated(new Date());
+        }
+      } catch (loadError) {
+        if (!cancelled) {
+          setError(loadError.message || "Could not load impact analytics.");
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
     }
-  }
 
-  loadAnalytics();
+    loadAnalytics();
+    const intervalId = window.setInterval(loadAnalytics, 30_000);
 
-  return () => {
-    cancelled = true;
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [refreshVersion]);
+
+  return {
+    analytics,
+    loading,
+    error,
+    lastUpdated,
+    refresh: () => setRefreshVersion(version => version + 1)
   };
-}, []);
+}
+
+export function LandingPage({ navigate }) {
+const { analytics, loading: analyticsLoading, error: analyticsError } =
+  useLiveImpactAnalytics();
   
   return (
     <div style={{ width: '100vw', height: '100vh', overflowY: 'auto', background: 'var(--page-bg)' }}>
@@ -166,7 +189,7 @@ useEffect(() => {
 
       <section style={{ padding: '80px 60px', maxWidth: '1200px', margin: '0 auto', textAlign: 'center' }} id="impact">
         <h2 style={{ fontSize: '32px', fontWeight: '900', marginBottom: '12px' }}>Real-Time Impact Metrics</h2>
-        <p style={{ fontSize: '16px', color: 'var(--text-secondary)', marginBottom: '40px' }}>Demonstration data representing live platform telemetry.</p>
+        <p style={{ fontSize: '16px', color: 'var(--text-secondary)', marginBottom: '40px' }}>Live metrics from current operational records, refreshed every 30 seconds.</p>
         <div
   style={{
     display: "grid",
@@ -195,7 +218,7 @@ useEffect(() => {
       val: analytics
         ? analytics.activeRecipientOrganizations != null
           ? analytics.activeRecipientOrganizations.toLocaleString()
-          : "Not available"
+          : "Unavailable"
         : analyticsLoading
           ? "Loading..."
           : "Unavailable",
@@ -244,6 +267,17 @@ useEffect(() => {
       </p>
     </div>
   ))}
+
+  {analyticsError && (
+    <p role="status" style={{
+      gridColumn: "1 / -1",
+      color: "var(--text-secondary)",
+      fontSize: "12px",
+      textAlign: "center"
+    }}>
+      Live metrics could not be refreshed. Retrying automatically.
+    </p>
+  )}
 </div>
       </section>
 
@@ -261,12 +295,12 @@ export function LoginPage({
   setUserRole,
   setCurrentUser,
   addToast,
+  initialRole = '',
 }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [roleSelect, setRoleSelect] = useState('');
+  const [roleSelect, setRoleSelect] = useState(initialRole);
 
-  
 const handleLogin = async (e) => {
   e.preventDefault();
 
@@ -277,18 +311,55 @@ const handleLogin = async (e) => {
     return;
   }
 
+  if (!roleSelect) {
+    addToast("Please select an account type.", "error");
+    return;
+  }
+
   try {
+    if (roleSelect === "driver") {
+      const response = await loginDriver({
+        email: normalizedEmail,
+        password,
+      });
+
+      if (!response.success || !response.token || !response.driver) {
+        throw new Error("The driver login response was incomplete.");
+      }
+
+      const driverUser = {
+        id: response.driver.id,
+        name: response.driver.name,
+        email: response.driver.email,
+        phone: response.driver.phone,
+        role: "driver",
+        vehicleType: response.driver.vehicleType,
+        capacityMeals: response.driver.capacityMeals,
+        status: response.driver.status,
+        currentLocation: response.driver.currentLocation,
+      };
+
+      localStorage.removeItem("nourivya-token");
+      localStorage.removeItem("nourivya-user");
+      localStorage.setItem("nourivya-driver-token", response.token);
+      localStorage.setItem(
+        "nourivya-driver-user",
+        JSON.stringify(driverUser)
+      );
+
+      setCurrentUser(driverUser);
+      setUserRole("driver");
+      addToast("Driver login successful!", "success");
+      navigate("/driver/dashboard");
+      return;
+    }
+
     // Admin is still a simulated demo role, not real authentication.
     if (roleSelect === "admin") {
       addToast(
         "Administrator access is still in demo mode.",
         "error"
       );
-      return;
-    }
-
-    if (!roleSelect) {
-      addToast("Please select your organization role.", "error");
       return;
     }
 
@@ -316,6 +387,8 @@ if (organizationRole !== roleSelect) {
 }
 
 // Save the token and logged-in organization.
+localStorage.removeItem("nourivya-driver-token");
+localStorage.removeItem("nourivya-driver-user");
 localStorage.setItem("nourivya-token", response.data.token);
 
 localStorage.setItem(
@@ -387,7 +460,11 @@ localStorage.setItem(
             </div>
           </div>
           <h3 style={{ fontSize: '24px', fontWeight: '800', marginBottom: '8px' }}>Welcome Back</h3>
-          <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '32px' }}>Sign in to manage surplus rescue operations.</p>
+          <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '32px' }}>
+            {roleSelect === 'driver'
+              ? 'Sign in to manage your delivery assignments.'
+              : 'Sign in to manage surplus rescue operations.'}
+          </p>
 
           <form onSubmit={handleLogin} style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
             <div>
@@ -419,7 +496,7 @@ localStorage.setItem(
       marginBottom: '8px',
     }}
   >
-    Organization Role
+    Account Type
   </label>
 
   <select
@@ -439,6 +516,7 @@ localStorage.setItem(
     <option value="">Select your role</option>
     <option value="provider">Food Provider (Restaurant/Hotel)</option>
     <option value="recipient">Recipient Organization (NGO/Shelter)</option>
+    <option value="driver">Delivery Driver</option>
   </select>
 </div>
             <button type="submit" style={{ background: 'var(--primary-green)', color: '#fff', border: 'none', padding: '14px', borderRadius: 'var(--radius-sm)', fontWeight: '700', fontSize: '15px', cursor: 'pointer', marginTop: '10px' }}>
@@ -447,7 +525,7 @@ localStorage.setItem(
           </form>
 
           <p style={{ marginTop: '24px', textAlign: 'center', fontSize: '14px', color: 'var(--text-secondary)' }}>
-            Don't have an account? <span onClick={() => navigate('/register')} style={{ color: 'var(--primary-green)', fontWeight: '700', cursor: 'pointer' }}>Register organization</span>
+            Don't have an account? <span onClick={() => navigate('/register')} style={{ color: 'var(--primary-green)', fontWeight: '700', cursor: 'pointer' }}>Register an organization or driver</span>
           </p>
         </div>
       </div>
@@ -468,7 +546,12 @@ localStorage.setItem(
 }
 
 
-export function RegisterPage({ navigate, addToast }) {
+export function RegisterPage({
+  navigate,
+  addToast,
+  initialAccountType = 'organization',
+}) {
+  const [accountType, setAccountType] = useState(initialAccountType);
   const [formData, setFormData] = useState({
     name: '',
     contact: '',
@@ -479,6 +562,15 @@ export function RegisterPage({ navigate, addToast }) {
     orgType: 'Restaurant',
     city: 'Bengaluru',
   });
+  const [driverFormData, setDriverFormData] = useState({
+    name: '',
+    phone: '',
+    email: '',
+    password: '',
+    vehicleType: 'motorcycle',
+    capacityMeals: '',
+    currentLocation: '',
+  });
 
   const [submitting, setSubmitting] = useState(false);
 
@@ -486,6 +578,40 @@ export function RegisterPage({ navigate, addToast }) {
     e.preventDefault();
 
     if (submitting) return;
+
+    if (accountType === 'driver') {
+      const email = driverFormData.email.trim().toLowerCase();
+      const phone = driverFormData.phone.trim();
+      const phoneDigits = phone.replace(/\D/g, '');
+      const capacityMeals = Number(driverFormData.capacityMeals);
+
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        addToast('Please enter a valid email address.', 'error');
+        return;
+      }
+
+      if (
+        !/^\+?[0-9\s()-]{7,20}$/.test(phone) ||
+        phoneDigits.length < 7 ||
+        phoneDigits.length > 15
+      ) {
+        addToast('Please enter a valid phone number.', 'error');
+        return;
+      }
+
+      if (driverFormData.password.length < 8) {
+        addToast('Password must contain at least 8 characters.', 'error');
+        return;
+      }
+
+      if (!Number.isInteger(capacityMeals) || capacityMeals < 1) {
+        addToast(
+          'Vehicle capacity must be a whole number of at least one meal.',
+          'error'
+        );
+        return;
+      }
+    }
 
     setSubmitting(true);
 
@@ -498,6 +624,25 @@ export function RegisterPage({ navigate, addToast }) {
     };
 
     try {
+      if (accountType === 'driver') {
+        const response = await registerDriver({
+          ...driverFormData,
+          name: driverFormData.name.trim(),
+          phone: driverFormData.phone.trim(),
+          email: driverFormData.email.trim().toLowerCase(),
+          capacityMeals: Number(driverFormData.capacityMeals),
+          currentLocation: driverFormData.currentLocation.trim(),
+        });
+
+        if (!response.success) {
+          throw new Error(response.message || 'Driver registration failed.');
+        }
+
+        addToast('Driver account created successfully!', 'success');
+        navigate('/login');
+        return;
+      }
+
       const response = await createOrganization({
         name: formData.name.trim(),
         type: typeMap[formData.orgType],
@@ -618,13 +763,28 @@ export function RegisterPage({ navigate, addToast }) {
           color: 'var(--text-secondary)',
           marginBottom: '32px',
         }}>
-          Register your organization to participate in intelligent food rescue.
+          {accountType === 'driver'
+            ? 'Register as a delivery driver and help deliver meals to communities.'
+            : 'Register your organization to participate in intelligent food rescue.'}
         </p>
 
         <form
           onSubmit={handleSubmit}
           style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}
         >
+          <div>
+            <label style={labelStyle}>Account Type</label>
+            <select
+              value={accountType}
+              onChange={(e) => setAccountType(e.target.value)}
+              style={{ ...inputStyle, background: '#fff' }}
+            >
+              <option value="organization">Organization / NGO / Shelter</option>
+              <option value="driver">Delivery Driver</option>
+            </select>
+          </div>
+          {accountType === 'organization' ? (
+            <>
           <div style={{
             display: 'grid',
             gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
@@ -750,6 +910,111 @@ export function RegisterPage({ navigate, addToast }) {
     style={inputStyle}
   />
 </div>
+            </>
+          ) : (
+            <>
+              <div>
+                <label style={labelStyle}>Full Name</label>
+                <input
+                  type="text"
+                  required
+                  value={driverFormData.name}
+                  onChange={(e) => setDriverFormData({
+                    ...driverFormData, name: e.target.value,
+                  })}
+                  style={inputStyle}
+                />
+              </div>
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+                gap: '16px',
+              }}>
+                <div>
+                  <label style={labelStyle}>Email Address</label>
+                  <input
+                    type="email"
+                    required
+                    value={driverFormData.email}
+                    onChange={(e) => setDriverFormData({
+                      ...driverFormData, email: e.target.value,
+                    })}
+                    style={inputStyle}
+                  />
+                </div>
+                <div>
+                  <label style={labelStyle}>Phone Number</label>
+                  <input
+                    type="tel"
+                    required
+                    maxLength={20}
+                    value={driverFormData.phone}
+                    onChange={(e) => setDriverFormData({
+                      ...driverFormData, phone: e.target.value,
+                    })}
+                    style={inputStyle}
+                  />
+                </div>
+                <div>
+                  <label style={labelStyle}>Vehicle Type</label>
+                  <select
+                    value={driverFormData.vehicleType}
+                    onChange={(e) => setDriverFormData({
+                      ...driverFormData, vehicleType: e.target.value,
+                    })}
+                    style={{ ...inputStyle, background: '#fff' }}
+                  >
+                    <option value="bicycle">Bicycle</option>
+                    <option value="motorcycle">Motorcycle</option>
+                    <option value="car">Car</option>
+                    <option value="van">Van</option>
+                    <option value="truck">Truck</option>
+                    <option value="other">Other</option>
+                  </select>
+                </div>
+                <div>
+                  <label style={labelStyle}>Meal Carrying Capacity</label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    required
+                    value={driverFormData.capacityMeals}
+                    onChange={(e) => setDriverFormData({
+                      ...driverFormData, capacityMeals: e.target.value,
+                    })}
+                    style={inputStyle}
+                  />
+                </div>
+              </div>
+              <div>
+                <label style={labelStyle}>Current Location</label>
+                <input
+                  type="text"
+                  required
+                  value={driverFormData.currentLocation}
+                  onChange={(e) => setDriverFormData({
+                    ...driverFormData, currentLocation: e.target.value,
+                  })}
+                  style={inputStyle}
+                />
+              </div>
+              <div>
+                <label style={labelStyle}>Password</label>
+                <input
+                  type="password"
+                  required
+                  minLength={8}
+                  autoComplete="new-password"
+                  value={driverFormData.password}
+                  onChange={(e) => setDriverFormData({
+                    ...driverFormData, password: e.target.value,
+                  })}
+                  style={inputStyle}
+                />
+              </div>
+            </>
+          )}
 
           <button
             type="submit"
@@ -767,7 +1032,11 @@ export function RegisterPage({ navigate, addToast }) {
               marginTop: '10px',
             }}
           >
-            {submitting ? 'Registering...' : 'Complete Registration'}
+            {submitting
+              ? 'Registering...'
+              : accountType === 'driver'
+                ? 'Register as Driver'
+                : 'Complete Registration'}
           </button>
         </form>
 
@@ -843,6 +1112,14 @@ export function AdminDashboard({ appData, addToast, navigate }) {
     val: appData.deliveries.length,
     icon: Truck,
     color: 'var(--primary-green)'
+  },
+  {
+    label: 'Registered Drivers',
+    val: appData.drivers.length,
+    detail: `${appData.drivers.filter(driver => String(driver.status).toLowerCase() === 'available').length} available`,
+    icon: Users,
+    color: 'var(--info-blue)',
+    action: () => navigate('/logistics')
   }
 ].map((card, i) => {
           const Icon = card.icon;
@@ -854,6 +1131,24 @@ export function AdminDashboard({ appData, addToast, navigate }) {
               <div>
                 <p style={{ fontSize: '12px', fontWeight: '700', color: 'var(--text-secondary)', marginBottom: '4px' }}>{card.label}</p>
                 <h3 style={{ fontSize: '22px', fontWeight: '900', color: 'var(--text-primary)' }}>{card.val}</h3>
+                {card.detail && (
+                  <button
+                    type="button"
+                    onClick={card.action}
+                    style={{
+                      marginTop: '6px',
+                      padding: 0,
+                      border: 'none',
+                      background: 'none',
+                      color: 'var(--primary-green)',
+                      fontSize: '12px',
+                      fontWeight: '700',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    {card.detail} · Manage drivers
+                  </button>
+                )}
               </div>
             </div>
           );
@@ -4137,42 +4432,8 @@ export function ReplanningCenter({ addToast }) {
 }
 
 export function AnalyticsPage() {
-  const [analytics, setAnalytics] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadAnalytics() {
-      try {
-        const response = await getImpactAnalytics();
-
-        if (!response.success) {
-          throw new Error("Could not load impact analytics.");
-        }
-
-        if (!cancelled) {
-          setAnalytics(response.data);
-          setError("");
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setError(err.message || "Could not load impact analytics.");
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
-    }
-
-    loadAnalytics();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const { analytics, loading, error, lastUpdated, refresh } =
+    useLiveImpactAnalytics();
 
   const metrics = analytics
     ? [
@@ -4192,6 +4453,12 @@ export function AnalyticsPage() {
           value: `${analytics.activeProviderNetwork} Orgs`,
         },
         {
+          label: "Recipient NGOs & Shelters",
+          value: analytics.activeRecipientOrganizations == null
+            ? "Unavailable"
+            : `${analytics.activeRecipientOrganizations} Orgs`,
+        },
+        {
           label: "Successful Delivery Rate",
           value:
             analytics.successfulDeliveryRate == null
@@ -4208,8 +4475,41 @@ export function AnalyticsPage() {
           Impact & Sustainability Analytics
         </h2>
         <p style={{ fontSize: "14px", color: "var(--text-secondary)" }}>
-          Impact metrics calculated from operational database records.
+          Live impact metrics refreshed every 30 seconds.
         </p>
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "12px",
+          flexWrap: "wrap",
+          marginTop: "12px"
+        }}>
+          <p style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
+            {lastUpdated
+              ? `Last updated ${lastUpdated.toLocaleTimeString()}`
+              : "Waiting for live data"}
+          </p>
+          <button
+            type="button"
+            onClick={refresh}
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "7px",
+              padding: "9px 13px",
+              border: "1px solid var(--border-color)",
+              borderRadius: "var(--radius-sm)",
+              background: "var(--card-bg)",
+              color: "var(--primary-green)",
+              fontWeight: "700",
+              cursor: "pointer"
+            }}
+          >
+            <RefreshCw size={15} />
+            Refresh now
+          </button>
+        </div>
       </div>
 
       {loading && <p>Loading live analytics...</p>}
@@ -4223,7 +4523,7 @@ export function AnalyticsPage() {
           }}
         >
           <p>{error}</p>
-          <button onClick={() => window.location.reload()}>
+          <button onClick={refresh}>
             Retry
           </button>
         </div>
