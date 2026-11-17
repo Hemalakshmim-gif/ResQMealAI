@@ -32,6 +32,7 @@ function failureResult(agent, input, error) {
 async function runFoodRescueWorkflow({
   foodId,
   expectedDemand,
+  providerOrganizationId,
   now = new Date()
 }) {
   if (!mongoose.isValidObjectId(foodId)) {
@@ -102,7 +103,8 @@ async function runFoodRescueWorkflow({
 
   try {
     execution = await createWorkflowExecution({
-      foodId: workflowKey
+      foodId: workflowKey,
+      providerOrganizationId
     });
 
     const restaurant = await executeAgent(

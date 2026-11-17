@@ -5,6 +5,7 @@ const API_BASE_URL =
 
 async function apiRequest(path, options = {}) {
   const token = localStorage.getItem("nourivya-token");
+  const isAgentWorkflowRequest = path.startsWith("/api/agents/workflows");
   const isDriverRequest =
     path.startsWith("/api/driver-deliveries") ||
     path === "/api/driver-auth/availability";
@@ -15,7 +16,12 @@ async function apiRequest(path, options = {}) {
   };
 
   // Organization authentication
-if (path.startsWith("/api/settings") && token) {
+if (
+  (path.startsWith("/api/settings") ||
+    path.startsWith("/api/food-safety/reviews") ||
+    isAgentWorkflowRequest) &&
+  token
+) {
   headers.Authorization = `Bearer ${token}`;
 }
 

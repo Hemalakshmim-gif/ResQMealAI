@@ -23,13 +23,20 @@ function objectIdString(value, label) {
   return new mongoose.Types.ObjectId(value).toString();
 }
 
-async function createWorkflowExecution({ foodId }) {
+async function createWorkflowExecution({
+  foodId,
+  providerOrganizationId
+}) {
   const normalizedFoodId = objectIdString(foodId, "foodId");
+  const providerOrganization = providerOrganizationId
+    ? objectIdString(providerOrganizationId, "providerOrganizationId")
+    : null;
 
   try {
     await AgentExecution.init();
     return await AgentExecution.create({
       food: normalizedFoodId,
+      providerOrganization,
       activeKey: normalizedFoodId,
       workflowStatus: "RUNNING",
       statusMessage: "Workflow execution started.",

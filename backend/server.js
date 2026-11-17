@@ -22,6 +22,7 @@ const replanningRoutes = require("./src/routes/replanningRoutes");
 const authRoutes = require("./src/routes/authRoutes");
 const driverAuthRoutes = require("./src/routes/driverAuthRoutes");
 const driverDeliveryRoutes = require("./src/routes/driverDeliveryRoutes");
+const agentWorkflowRoutes = require("./src/routes/agentWorkflowRoutes");
 
 const app = express();
 
@@ -45,6 +46,7 @@ app.use("/api/replanning", replanningRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/driver-auth", driverAuthRoutes);
 app.use("/api/driver-deliveries", driverDeliveryRoutes);
+app.use("/api/agents", agentWorkflowRoutes);
 
 const PORT = process.env.PORT || 5000;
 

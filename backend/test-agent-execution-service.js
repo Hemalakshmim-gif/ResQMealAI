@@ -56,6 +56,7 @@ async function main() {
 
     await test("Workflow creation stores a unique active key", async () => {
       const foodId = id();
+      const providerOrganizationId = id();
       let document;
       AgentExecution.init = async () => {};
       AgentExecution.create = async (value) => {
@@ -63,8 +64,12 @@ async function main() {
         return { _id: id(), ...value };
       };
 
-      const execution = await service.createWorkflowExecution({ foodId });
+      const execution = await service.createWorkflowExecution({
+        foodId,
+        providerOrganizationId
+      });
       assert.equal(document.food, foodId);
+      assert.equal(document.providerOrganization, providerOrganizationId);
       assert.equal(document.activeKey, foodId);
       assert.equal(document.workflowStatus, "RUNNING");
       assert.equal(execution.activeKey, foodId);

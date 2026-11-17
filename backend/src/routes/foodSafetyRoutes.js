@@ -4,6 +4,7 @@ const mongoose = require("mongoose");
 
 const FoodInventory = require("../models/FoodInventory");
 const FoodSafetyReview = require("../models/FoodSafetyReview");
+const { authenticateOrganization } = require("../middleware/authMiddleware");
 
 const {
   evaluateFoodSafety,
@@ -63,7 +64,7 @@ router.get("/analyze", async (req, res) => {
 
 // POST /api/food-safety/reviews
 // Records a safety review without bypassing eligibility checks.
-router.post("/reviews", async (req, res) => {
+router.post("/reviews", authenticateOrganization, async (req, res) => {
   try {
     const {
       foodId,
@@ -89,6 +90,13 @@ router.post("/reviews", async (req, res) => {
       });
     }
 
+    if (req.organization.role !== "provider") {
+      return res.status(403).json({
+        success: false,
+        message: "Only provider organizations can review their food listings."
+      });
+    }
+
     if (
       typeof reviewedBy !== "string" ||
       !reviewedBy.trim()
@@ -99,7 +107,10 @@ router.post("/reviews", async (req, res) => {
       });
     }
 
-    const food = await FoodInventory.findById(foodId);
+    const food = await FoodInventory.findOne({
+      _id: foodId,
+      providerOrganization: req.organization.id
+    });
 
     if (!food) {
       return res.status(404).json({
