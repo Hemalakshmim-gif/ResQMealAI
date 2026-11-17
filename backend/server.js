@@ -1,10 +1,14 @@
 
 require("dotenv").config();
 
+const http = require("http");
 const express = require("express");
 const cors = require("cors");
 
 const connectDB = require("./src/config/db");
+const {
+  initializeTrackingSocket
+} = require("./src/services/trackingSocket");
 const healthRoutes = require("./src/routes/healthRoutes");
 const inventoryRoutes = require("./src/routes/inventoryRoutes");
 const organizationRoutes = require("./src/routes/organizationRoutes");
@@ -22,12 +26,16 @@ const replanningRoutes = require("./src/routes/replanningRoutes");
 const authRoutes = require("./src/routes/authRoutes");
 const driverAuthRoutes = require("./src/routes/driverAuthRoutes");
 const driverDeliveryRoutes = require("./src/routes/driverDeliveryRoutes");
+const trackingRoutes = require("./src/routes/trackingRoutes");
 const agentWorkflowRoutes = require("./src/routes/agentWorkflowRoutes");
 
 const app = express();
+const httpServer = http.createServer(app);
+const io = initializeTrackingSocket(httpServer);
 
 app.use(cors());
 app.use(express.json());
+app.set("io", io);
 
 app.use("/api/health", healthRoutes);
 app.use("/api/inventory", inventoryRoutes);
@@ -46,6 +54,7 @@ app.use("/api/replanning", replanningRoutes);
 app.use("/api/auth", authRoutes);
 app.use("/api/driver-auth", driverAuthRoutes);
 app.use("/api/driver-deliveries", driverDeliveryRoutes);
+app.use("/api/tracking", trackingRoutes);
 app.use("/api/agents", agentWorkflowRoutes);
 
 const PORT = process.env.PORT || 5000;
@@ -53,7 +62,7 @@ const PORT = process.env.PORT || 5000;
 const startServer = async () => {
   await connectDB();
 
-  app.listen(PORT, () => {
+  httpServer.listen(PORT, () => {
     console.log(`Nourivya API running on port ${PORT}`);
     console.log(`Health URL: http://localhost:${PORT}/api/health`);
   });

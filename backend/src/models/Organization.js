@@ -1,5 +1,6 @@
 
 const mongoose = require("mongoose");
+const coordinatesSchema = require("./coordinatesSchema");
 
 const organizationSchema = new mongoose.Schema(
   {
@@ -53,6 +54,11 @@ const organizationSchema = new mongoose.Schema(
       type: String,
       required: [true, "City is required"],
       trim: true
+    },
+
+    coordinates: {
+      type: coordinatesSchema,
+      default: undefined
     },
 
     acceptedFoodTypes: {

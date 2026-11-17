@@ -533,8 +533,8 @@ const [userRole, setUserRole] = useState(() => {
   />
 )}
               {currentRoute.startsWith('/deliveries/') && <DeliveryTrackingView appData={appData} currentRoute={currentRoute} navigate={navigate} />}
-              {currentRoute === '/agents' && <AgentActivityPage appData={appData} />}
-              {currentRoute === '/monitoring' && <MonitoringPage appData={appData} setAppData={setAppData} addToast={addToast} />}
+              {currentRoute === '/agents' && <AgentActivityPage appData={appData} currentUser={currentUser} addToast={addToast} />}
+              {currentRoute === '/monitoring' && <MonitoringPage appData={appData} setAppData={setAppData} addToast={addToast} currentUser={currentUser} />}
               {currentRoute === '/replanning' && <ReplanningCenter appData={appData} setAppData={setAppData} addToast={addToast} />}
               {currentRoute === '/analytics' && <AnalyticsPage appData={appData} />}
               {currentRoute === '/notifications' && <NotificationsPage appData={appData} setAppData={setAppData} addToast={addToast} />}

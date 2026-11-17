@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { 
-  Truck, Users, Plus, CheckCircle2, MapPin, RefreshCw, Building, Database, Cpu, Layers, TrendingUp
+  Truck, Users, Plus, CheckCircle2, RefreshCw, Building, Database, Cpu, Layers, TrendingUp
 } from 'lucide-react';
 import { 
   ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid
@@ -11,6 +11,8 @@ import {
   createDonation,
   createFood,
   getOrganizations,
+  getTrackingSnapshot,
+  getDeliveryRoute,
   loginOrganization,
   loginDriver,
   registerDriver,
@@ -24,9 +26,19 @@ import {
   markAllNotificationsRead,
   getImpactAnalytics,
   getMonitoringIncidents,
+  getAgentWorkflowHistory,
+  getAgentWorkflow,
+  startAgentWorkflow,
+  submitAgentWorkflowSafetyReview,
   getReplanningProposals,
   approveReplanningProposal
 } from './api.js';
+import { createTrackingSocket } from './trackingSocket.js';
+import LiveTrackingMap from './components/tracking/LiveTrackingMap.jsx';
+
+const AGENT_WORKFLOW_REQUEST_TIMEOUT_MS = 15000;
+const AGENT_WORKFLOW_TIMEOUT_MESSAGE =
+  "Loading agent workflows timed out. Check the backend and MongoDB connection, then refresh.";
 
 function useLiveImpactAnalytics() {
   const [analytics, setAnalytics] = useState(null);
@@ -561,6 +573,8 @@ export function RegisterPage({
     address: '',
     orgType: 'Restaurant',
     city: 'Bengaluru',
+    latitude: '',
+    longitude: '',
   });
   const [driverFormData, setDriverFormData] = useState({
     name: '',
@@ -613,6 +627,38 @@ export function RegisterPage({
       }
     }
 
+    if (accountType === 'organization') {
+      const hasLatitude = formData.latitude.trim() !== '';
+      const hasLongitude = formData.longitude.trim() !== '';
+
+      if (hasLatitude !== hasLongitude) {
+        addToast(
+          'Enter both latitude and longitude, or leave both blank.',
+          'error'
+        );
+        return;
+      }
+
+      if (hasLatitude) {
+        const latitude = Number(formData.latitude);
+        const longitude = Number(formData.longitude);
+        if (
+          !Number.isFinite(latitude) ||
+          latitude < -90 ||
+          latitude > 90 ||
+          !Number.isFinite(longitude) ||
+          longitude < -180 ||
+          longitude > 180
+        ) {
+          addToast(
+            'Coordinates must be valid decimal-degree latitude and longitude values.',
+            'error'
+          );
+          return;
+        }
+      }
+    }
+
     setSubmitting(true);
 
     const typeMap = {
@@ -652,6 +698,14 @@ export function RegisterPage({
         phone: formData.phone.trim(),
         address: formData.address.trim(),
         city: formData.city.trim(),
+        ...(formData.latitude.trim() && formData.longitude.trim()
+          ? {
+              coordinates: {
+                latitude: Number(formData.latitude),
+                longitude: Number(formData.longitude),
+              },
+            }
+          : {}),
       });
 
       const organization = response.data;
@@ -891,6 +945,51 @@ export function RegisterPage({
               style={inputStyle}
             />
           </div>
+
+                    <div>
+                      <label style={labelStyle}>
+                        Organization Coordinates (optional)
+                      </label>
+                      <p style={{
+                        color: 'var(--text-secondary)',
+                        fontSize: '12px',
+                        marginBottom: '8px',
+                      }}>
+                        Decimal-degree coordinates enable delivery routing and ETA when a server routing service is configured.
+                      </p>
+                      <div style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                        gap: '12px',
+                      }}>
+                        <input
+                          type="number"
+                          min="-90"
+                          max="90"
+                          step="any"
+                          aria-label="Organization latitude"
+                          placeholder="Latitude"
+                          value={formData.latitude}
+                          onChange={(e) => setFormData({
+                            ...formData, latitude: e.target.value,
+                          })}
+                          style={inputStyle}
+                        />
+                        <input
+                          type="number"
+                          min="-180"
+                          max="180"
+                          step="any"
+                          aria-label="Organization longitude"
+                          placeholder="Longitude"
+                          value={formData.longitude}
+                          onChange={(e) => setFormData({
+                            ...formData, longitude: e.target.value,
+                          })}
+                          style={inputStyle}
+                        />
+                      </div>
+                    </div>
 
           <div>
   <label style={labelStyle}>Password</label>
@@ -3790,13 +3889,66 @@ export function LogisticsPage({ appData, navigate }) {
   );
 }
 
-export function DeliveryTrackingView({ appData, currentRoute, navigate }) {
-  const requestedId = (currentRoute || '').split('/')[2];
+function isValidTrackingCoordinate(point) {
+  return (
+    Number.isFinite(point?.latitude) &&
+    point.latitude >= -90 &&
+    point.latitude <= 90 &&
+    Number.isFinite(point?.longitude) &&
+    point.longitude >= -180 &&
+    point.longitude <= 180
+  );
+}
 
-  const deliveries = appData.deliveries || [];
-  const delivery = requestedId
-    ? deliveries.find((item) => item.id === requestedId)
-    : deliveries[0];
+function distanceBetweenCoordinates(first, second) {
+  const radians = (degrees) => (degrees * Math.PI) / 180;
+  const latitudeDelta = radians(second.latitude - first.latitude);
+  const longitudeDelta = radians(second.longitude - first.longitude);
+  const firstLatitude = radians(first.latitude);
+  const secondLatitude = radians(second.latitude);
+  const haversine =
+    Math.sin(latitudeDelta / 2) ** 2 +
+    Math.cos(firstLatitude) *
+      Math.cos(secondLatitude) *
+      Math.sin(longitudeDelta / 2) ** 2;
+
+  const boundedHaversine = Math.min(1, Math.max(0, haversine));
+  return (
+    6371000 *
+    2 *
+    Math.atan2(
+      Math.sqrt(boundedHaversine),
+      Math.sqrt(1 - boundedHaversine)
+    )
+  );
+}
+
+export function DeliveryTrackingView({ currentRoute, navigate }) {
+  const requestedId = (currentRoute || '').split('/')[2];
+  const [session, setSession] = useState(() => ({
+    deliveryId: requestedId,
+    tracking: null,
+    connectionState: 'connecting',
+    error: '',
+    route: null,
+    routeError: '',
+    routeLoading: false
+  }));
+  const hasCurrentSession = session.deliveryId === requestedId;
+  const tracking = hasCurrentSession ? session.tracking : null;
+  const connectionState = !requestedId
+    ? 'error'
+    : hasCurrentSession
+      ? session.connectionState
+      : 'connecting';
+  const error = !requestedId
+    ? 'A delivery ID is required to open tracking.'
+    : hasCurrentSession
+      ? session.error
+      : '';
+  const socketRef = useRef(null);
+  const joinDeliveryRef = useRef(null);
+  const [currentTime, setCurrentTime] = useState(0);
 
   const formatDate = (value) => {
     if (!value) return 'Not recorded';
@@ -3804,29 +3956,359 @@ export function DeliveryTrackingView({ appData, currentRoute, navigate }) {
     return Number.isNaN(date.getTime()) ? 'Not recorded' : date.toLocaleString();
   };
 
-  if (!delivery) {
-    return (
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-        <button
-          onClick={() => navigate('/logistics')}
-          style={{ background: 'none', border: 'none', color: 'var(--primary-green)', fontWeight: '700', cursor: 'pointer', alignSelf: 'flex-start' }}
-        >
-          ← Back to Logistics
-        </button>
-        <div style={{ background: '#FFFFFF', padding: '36px', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border-color)' }}>
-          <h2 style={{ fontSize: '24px', fontWeight: '900' }}>Delivery Not Found</h2>
-          <p style={{ color: 'var(--text-secondary)', marginTop: '12px' }}>
-            No matching delivery is available. Return to Logistics and select a delivery.
-          </p>
-        </div>
-      </div>
-    );
-  }
+  useEffect(() => {
+    const timer = window.setInterval(() => setCurrentTime(Date.now()), 5000);
+    return () => window.clearInterval(timer);
+  }, []);
 
-  const status = String(delivery.status || 'unknown').replaceAll('_', ' ');
-  const driverName = typeof delivery.driver === 'string'
-    ? delivery.driver
-    : delivery.driver?.name || 'Unassigned';
+  useEffect(() => {
+    if (!requestedId) {
+      return undefined;
+    }
+
+    let active = true;
+    const updateSession = (updates) => {
+      setSession((previous) => ({
+        deliveryId: requestedId,
+        tracking:
+          previous.deliveryId === requestedId ? previous.tracking : null,
+        connectionState:
+          previous.deliveryId === requestedId
+            ? previous.connectionState
+            : 'connecting',
+        error: previous.deliveryId === requestedId ? previous.error : '',
+        route: previous.deliveryId === requestedId ? previous.route : null,
+        routeError:
+          previous.deliveryId === requestedId ? previous.routeError : '',
+        routeLoading:
+          previous.deliveryId === requestedId ? previous.routeLoading : false,
+        ...updates
+      }));
+    };
+
+    const socket = createTrackingSocket();
+    socketRef.current = socket;
+    let socketJoined = false;
+    let restFallbackTimer = null;
+    let restFallbackInFlight = false;
+    let routeRequestsDisabled = false;
+    let lastRouteRequest = null;
+
+    const stopRestFallback = () => {
+      if (restFallbackTimer) {
+        window.clearInterval(restFallbackTimer);
+        restFallbackTimer = null;
+      }
+    };
+
+    const handleRouteFailure = (failure) => {
+      if (!active) return;
+
+      if (
+        [
+          'ROUTING_NOT_CONFIGURED',
+          'DESTINATION_COORDINATES_UNAVAILABLE'
+        ].includes(failure?.code)
+      ) {
+        routeRequestsDisabled = true;
+      }
+
+      updateSession({
+        routeLoading: false,
+        routeError:
+          failure?.message || 'Could not calculate a road route and ETA.'
+      });
+    };
+
+    const handleRouteResponse = (response) => {
+      if (!active) return;
+
+      if (!response?.success || !response.data) {
+        handleRouteFailure(response);
+        return;
+      }
+
+      setSession((previous) => {
+        if (
+          previous.deliveryId !== requestedId ||
+          !previous.tracking
+        ) {
+          return previous;
+        }
+
+        const latestFixTime = new Date(
+          previous.tracking.latestLocation?.updatedAt
+        ).getTime();
+        const routeOriginTime = new Date(
+          response.data.originUpdatedAt
+        ).getTime();
+
+        if (
+          !Number.isFinite(latestFixTime) ||
+          latestFixTime !== routeOriginTime
+        ) {
+          return { ...previous, routeLoading: false };
+        }
+
+        return {
+          ...previous,
+          route: response.data,
+          routeError: '',
+          routeLoading: false
+        };
+      });
+    };
+
+    const requestRouteViaRest = () => {
+      getDeliveryRoute(requestedId)
+        .then(handleRouteResponse)
+        .catch(handleRouteFailure);
+    };
+
+    const requestRoute = () => {
+      if (!active || routeRequestsDisabled) return;
+
+      updateSession({ routeLoading: true, routeError: '' });
+
+      if (!socketJoined) {
+        requestRouteViaRest();
+        return;
+      }
+
+      socket.timeout(15000).emit(
+        'delivery:route',
+        { deliveryId: requestedId },
+        (timeoutError, response) => {
+          if (!active) return;
+
+          if (timeoutError) {
+            requestRouteViaRest();
+            return;
+          }
+
+          handleRouteResponse(response);
+        }
+      );
+    };
+
+    const requestRouteIfNeeded = (location) => {
+      if (
+        routeRequestsDisabled ||
+        !isValidTrackingCoordinate(location)
+      ) {
+        return;
+      }
+
+      const now = Date.now();
+      const movedMeters = lastRouteRequest
+        ? distanceBetweenCoordinates(lastRouteRequest.location, location)
+        : Number.POSITIVE_INFINITY;
+
+      if (
+        lastRouteRequest &&
+        now - lastRouteRequest.requestedAt < 30000 &&
+        movedMeters < 200
+      ) {
+        return;
+      }
+
+      lastRouteRequest = { requestedAt: now, location };
+      requestRoute();
+    };
+
+    const syncTrackingViaRest = async () => {
+      if (!active || socketJoined || restFallbackInFlight) return;
+      restFallbackInFlight = true;
+
+      try {
+        const response = await getTrackingSnapshot(requestedId);
+        if (!active || socketJoined) return;
+        if (!response?.success || !response.data) {
+          throw new Error(
+            response?.message || 'Could not load tracking via REST.'
+          );
+        }
+
+        updateSession({
+          tracking: response.data,
+          connectionState: 'fallback',
+          error: ''
+        });
+        if (response.data.trackingActive) {
+          requestRouteIfNeeded(response.data.latestLocation);
+        }
+      } catch (fallbackError) {
+        if (!active || socketJoined) return;
+        updateSession({
+          connectionState: 'error',
+          error:
+            fallbackError.message ||
+            'Could not load tracking via the REST fallback.'
+        });
+
+        if (
+          [
+            'AUTHENTICATION_REQUIRED',
+            'AUTHENTICATION_NOT_CONFIGURED',
+            'AUTHENTICATION_UNAVAILABLE',
+            'INVALID_SESSION',
+            'DELIVERY_ACCESS_DENIED',
+            'DELIVERY_NOT_FOUND',
+            'INVALID_DELIVERY_ID'
+          ].includes(fallbackError.code)
+        ) {
+          stopRestFallback();
+        }
+      } finally {
+        restFallbackInFlight = false;
+      }
+    };
+
+    const startRestFallback = () => {
+      if (!active || restFallbackTimer) return;
+      syncTrackingViaRest();
+      restFallbackTimer = window.setInterval(
+        syncTrackingViaRest,
+        15000
+      );
+    };
+
+    const joinDeliveryRoom = () => {
+      if (!active) return;
+      socketJoined = false;
+
+      updateSession({ connectionState: 'joining', error: '' });
+      socket.timeout(10000).emit(
+        'delivery:join',
+        { deliveryId: requestedId },
+        (timeoutError, response) => {
+          if (!active) return;
+
+          if (timeoutError) {
+            updateSession({
+              connectionState: 'error',
+              error: 'Could not load tracking over the live connection.'
+            });
+            startRestFallback();
+            return;
+          }
+
+          if (!response?.success) {
+            stopRestFallback();
+            updateSession({
+              connectionState: 'error',
+              error: response?.message || 'Could not load tracking for this delivery.'
+            });
+            return;
+          }
+
+          socketJoined = true;
+          stopRestFallback();
+          updateSession({
+            tracking: response.data,
+            error: '',
+            connectionState: 'connected'
+          });
+          if (response.data.trackingActive) {
+            requestRouteIfNeeded(response.data.latestLocation);
+          }
+        }
+      );
+    };
+    joinDeliveryRef.current = joinDeliveryRoom;
+
+    socket.on('connect', joinDeliveryRoom);
+    socket.on('connect_error', (connectError) => {
+      if (!active) return;
+      updateSession({
+        connectionState: 'error',
+        error: connectError.message || 'Could not connect to live tracking.'
+      });
+      startRestFallback();
+    });
+    socket.on('disconnect', () => {
+      if (!active) return;
+      socketJoined = false;
+      updateSession({ connectionState: 'reconnecting', error: '' });
+      startRestFallback();
+    });
+    socket.on('tracking:location', (update) => {
+      if (
+        !active ||
+        String(update?.deliveryId) !== String(requestedId) ||
+        !update.location
+      ) {
+        return;
+      }
+
+      setSession((previous) =>
+        previous.deliveryId === requestedId && previous.tracking
+          ? {
+              ...previous,
+              tracking: {
+                ...previous.tracking,
+                latestLocation: update.location,
+                trackingActive: true
+              }
+            }
+          : previous
+      );
+      requestRouteIfNeeded(update.location);
+    });
+
+    socket.connect();
+
+    return () => {
+      active = false;
+      stopRestFallback();
+      if (socket.connected && socketJoined) {
+        socket.emit('delivery:leave', { deliveryId: requestedId });
+      }
+      socket.disconnect();
+      if (socketRef.current === socket) {
+        socketRef.current = null;
+        joinDeliveryRef.current = null;
+      }
+    };
+  }, [requestedId]);
+
+  const locationTime = tracking?.latestLocation?.updatedAt
+    ? new Date(tracking.latestLocation.updatedAt)
+    : null;
+  const hasValidLocationTime =
+    locationTime && !Number.isNaN(locationTime.getTime());
+  const locationIsStale =
+    !hasValidLocationTime ||
+    !currentTime ||
+    currentTime - locationTime.getTime() > 60000;
+  const locationLabel = !tracking?.latestLocation
+    ? 'Waiting for the driver’s first GPS update'
+    : !tracking.trackingActive
+      ? 'Tracking is inactive — showing the last known location'
+    : connectionState === 'fallback'
+      ? 'Realtime unavailable — tracking is refreshing over REST'
+    : connectionState !== 'connected'
+      ? 'Disconnected — showing the last known location'
+      : locationIsStale
+        ? 'Last known location is stale'
+        : 'Live driver location';
+  const route = tracking?.trackingActive && !locationIsStale
+    ? session.route
+    : null;
+  const routeDistance = route
+    ? route.distanceMeters >= 1000
+      ? `${(route.distanceMeters / 1000).toFixed(1)} km`
+      : `${Math.round(route.distanceMeters)} m`
+    : '';
+  const routeDuration = route
+    ? Math.round(route.durationSeconds / 60) < 1
+      ? '<1 min'
+      : `${Math.round(route.durationSeconds / 60)} min`
+    : '';
+  const routeOriginMatchesLatest =
+    route &&
+    locationTime &&
+    new Date(route.originUpdatedAt).getTime() === locationTime.getTime();
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '28px' }}>
@@ -3842,89 +4324,760 @@ export function DeliveryTrackingView({ appData, currentRoute, navigate }) {
           Delivery Tracking
         </h2>
         <p style={{ fontSize: '14px', color: 'var(--text-secondary)', marginBottom: '24px' }}>
-          Delivery information loaded from the Nourivya backend.
+          Live delivery information is available only to organizations and drivers associated with this delivery.
         </p>
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px', marginBottom: '28px' }}>
-          {[
-            ['Delivery ID', delivery.id],
-            ['Status', status],
-            ['Driver', driverName],
-            ['Vehicle', delivery.vehicle || 'Not specified'],
-            ['Pickup Address', delivery.pickupAddress || 'Not recorded'],
-            ['Delivery Address', delivery.deliveryAddress || 'Not recorded'],
-            ['Scheduled Pickup', formatDate(delivery.plannedPickupAt)],
-            ['Picked Up At', formatDate(delivery.pickedUpAt)],
-            ['Delivered At', formatDate(delivery.deliveredAt)],
-          ].map(([label, value]) => (
-            <div key={label} style={{ padding: '16px', background: 'var(--page-bg)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', minWidth: 0 }}>
-              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '8px' }}>{label}</p>
-              <p style={{ fontSize: '14px', fontWeight: '700', overflowWrap: 'anywhere', textTransform: label === 'Status' ? 'capitalize' : 'none' }}>{value}</p>
+        <div
+          role={error ? 'alert' : 'status'}
+          style={{
+            padding: '14px',
+            marginBottom: '20px',
+            borderRadius: 'var(--radius-md)',
+            background: error ? '#FFF1F0' : 'var(--page-bg)',
+            border: '1px solid var(--border-color)',
+            color: error ? '#9B2525' : 'var(--text-secondary)'
+          }}
+        >
+          <strong>
+            {error
+              ? 'Tracking unavailable'
+              : connectionState === 'connected'
+                ? locationLabel
+                : connectionState === 'fallback'
+                  ? locationLabel
+                : connectionState === 'reconnecting'
+                  ? 'Reconnecting — last known location is retained'
+                  : 'Connecting to the authorized delivery tracking room…'}
+          </strong>
+          {error && <p style={{ marginTop: '6px' }}>{error}</p>}
+          {hasValidLocationTime && (
+            <p style={{ marginTop: '6px' }}>
+              Last GPS update: {formatDate(locationTime)}
+              {Number.isFinite(tracking.latestLocation.accuracy)
+                ? ` · Accuracy: ±${Math.round(tracking.latestLocation.accuracy)} m`
+                : ''}
+              {locationIsStale ? ' · Stale' : ''}
+            </p>
+          )}
+          {error && requestedId && (
+            <button
+              type="button"
+              onClick={() => {
+                if (socketRef.current?.connected) {
+                  joinDeliveryRef.current?.();
+                } else {
+                  socketRef.current?.connect();
+                }
+              }}
+              style={{
+                marginTop: '10px',
+                padding: '8px 12px',
+                border: '1px solid var(--border-color)',
+                borderRadius: 'var(--radius-sm)',
+                background: '#FFFFFF',
+                cursor: 'pointer'
+              }}
+            >
+              Retry connection
+            </button>
+          )}
+        </div>
+
+        {tracking && (
+          <>
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+              gap: '16px',
+              marginBottom: '20px'
+            }}>
+              {[
+                ['Delivery ID', tracking.deliveryId],
+                ['Status', String(tracking.status || 'unknown').replaceAll('_', ' ')],
+                ['Food', tracking.donation?.foodName || 'Not recorded'],
+                ['Quantity', tracking.donation?.quantity ?? 'Not recorded'],
+                ['Driver', tracking.driver?.name || 'Not assigned'],
+                ['Pickup', tracking.pickup?.address || 'Not recorded'],
+                ['Recipient', tracking.destination?.organizationName || 'Not recorded'],
+                ['Destination', tracking.destination?.address || 'Not recorded']
+              ].map(([label, value]) => (
+                <div key={label} style={{
+                  padding: '16px',
+                  background: 'var(--page-bg)',
+                  border: '1px solid var(--border-color)',
+                  borderRadius: 'var(--radius-md)',
+                  minWidth: 0
+                }}>
+                  <p style={{
+                    fontSize: '12px',
+                    color: 'var(--text-secondary)',
+                    marginBottom: '8px'
+                  }}>
+                    {label}
+                  </p>
+                  <p style={{
+                    fontSize: '14px',
+                    fontWeight: '700',
+                    overflowWrap: 'anywhere',
+                    textTransform: label === 'Status' ? 'capitalize' : 'none'
+                  }}>
+                    {value}
+                  </p>
+                </div>
+              ))}
+            </div>
+
+            {route && (
+              <div
+                role="status"
+                style={{
+                  padding: '16px',
+                  marginBottom: '16px',
+                  border: '1px solid var(--border-color)',
+                  borderRadius: 'var(--radius-md)',
+                  background: 'var(--page-bg)'
+                }}
+              >
+                <strong>
+                  Estimated drive: ~{routeDuration} · {routeDistance}
+                </strong>
+                <p style={{
+                  marginTop: '6px',
+                  color: 'var(--text-secondary)',
+                  fontSize: '13px'
+                }}>
+                  Route origin GPS fix: {formatDate(route.originUpdatedAt)}.
+                  {routeOriginMatchesLatest
+                    ? ' This matches the latest driver location.'
+                    : ' The driver has moved since this route was calculated; a refresh is pending.'}
+                  {' '}Live traffic may not be included.
+                  {session.routeLoading ? ' Refreshing route…' : ''}
+                </p>
+              </div>
+            )}
+
+            {!route && (
+              <p
+                role={session.routeError ? 'status' : undefined}
+                style={{
+                  marginBottom: '16px',
+                  color: 'var(--text-secondary)',
+                  fontSize: '13px'
+                }}
+              >
+                {session.routeError
+                  ? `Road route and ETA unavailable: ${session.routeError}`
+                  : !tracking.trackingActive
+                    ? 'Road route and ETA are unavailable while tracking is inactive.'
+                    : session.routeLoading
+                      ? 'Calculating road route and ETA…'
+                      : 'Waiting for a recent driver GPS fix and recipient coordinates to calculate the road route and ETA.'}
+              </p>
+            )}
+
+            <LiveTrackingMap tracking={tracking} route={route} />
+
+            <div style={{
+              display: 'flex',
+              gap: '14px',
+              flexWrap: 'wrap',
+              color: 'var(--text-secondary)',
+              fontSize: '12px'
+            }}>
+              <span>🔵 Driver</span>
+              <span>🟠 Pickup</span>
+              <span>🟢 Recipient</span>
+            </div>
+            <p style={{ color: 'var(--text-secondary)', fontSize: '13px' }}>
+              The map shows GPS coordinates and road geometry returned by the configured routing service. ETA is an estimate, not a delivery guarantee.
+            </p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function WorkflowSafetyReviewForm({
+  executionId,
+  assessment,
+  submitting,
+  onReview
+}) {
+  const [storageVerified, setStorageVerified] = useState(false);
+  const [packagingVerified, setPackagingVerified] = useState(false);
+  const [handlingVerified, setHandlingVerified] = useState(false);
+  const [reviewNotes, setReviewNotes] = useState("");
+  const checksPassed =
+    storageVerified && packagingVerified && handlingVerified;
+
+  const submitReview = (reviewStatus) => {
+    onReview({
+      executionId,
+      foodId: assessment.foodId,
+      reviewStatus,
+      storageVerified,
+      packagingVerified,
+      handlingVerified,
+      reviewNotes: reviewNotes.trim()
+    });
+  };
+
+  return (
+    <div style={{
+      marginTop: "14px",
+      padding: "14px",
+      borderRadius: "var(--radius-md)",
+      border: "1px solid var(--border-color)",
+      background: "var(--page-bg)"
+    }}>
+      <strong>Safety review required: {assessment.foodName || assessment.foodId}</strong>
+      {(assessment.reasons || []).map((reason) => (
+        <p key={reason} style={{ marginTop: "8px", color: "var(--text-secondary)" }}>
+          {reason}
+        </p>
+      ))}
+      <div style={{ display: "grid", gap: "8px", margin: "12px 0" }}>
+        {[
+          ["Storage verified", storageVerified, setStorageVerified],
+          ["Packaging verified", packagingVerified, setPackagingVerified],
+          ["Handling verified", handlingVerified, setHandlingVerified]
+        ].map(([label, checked, setChecked]) => (
+          <label key={label} style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+            <input
+              type="checkbox"
+              checked={checked}
+              onChange={(event) => setChecked(event.target.checked)}
+            />
+            {label}
+          </label>
+        ))}
+      </div>
+      <textarea
+        aria-label="Safety review notes"
+        maxLength={2000}
+        placeholder="Review notes (optional)"
+        value={reviewNotes}
+        onChange={(event) => setReviewNotes(event.target.value)}
+        style={{
+          width: "100%",
+          minHeight: "72px",
+          padding: "10px",
+          border: "1px solid var(--border-color)",
+          borderRadius: "var(--radius-sm)",
+          marginBottom: "10px"
+        }}
+      />
+      <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+        <button
+          type="button"
+          disabled={!checksPassed || submitting}
+          onClick={() => submitReview("approved")}
+        >
+          {submitting ? "Saving..." : "Approve after verification"}
+        </button>
+        <button
+          type="button"
+          disabled={submitting}
+          onClick={() => submitReview("rejected")}
+        >
+          Reject food
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function workflowStatusColors(status) {
+  if (["COMPLETED", "NO_SURPLUS", "NO_RECIPIENT"].includes(status)) {
+    return { background: "#DCFCE7", color: "#166534" };
+  }
+  if (["FAILED", "UNSAFE_FOOD"].includes(status)) {
+    return { background: "#FEE2E2", color: "#B91C1C" };
+  }
+  return { background: "#FEF3C7", color: "#92400E" };
+}
+
+export function AgentActivityPage({ appData, currentUser, addToast }) {
+  const [workflows, setWorkflows] = useState([]);
+  const [ownedFoods, setOwnedFoods] = useState([]);
+  const [selectedFoodId, setSelectedFoodId] = useState("");
+  const [expectedDemand, setExpectedDemand] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [reviewingKey, setReviewingKey] = useState("");
+  const [expandedWorkflowId, setExpandedWorkflowId] = useState("");
+  const [workflowDetails, setWorkflowDetails] = useState({});
+  const [detailLoadingId, setDetailLoadingId] = useState("");
+  const requestGeneration = useRef(0);
+  const workflowRequestController = useRef(null);
+  const organizationId = String(currentUser?.id || "");
+  const isProvider = currentUser?.role === "provider";
+
+  const loadWorkflowData = useCallback(async () => {
+    const requestId = ++requestGeneration.current;
+    workflowRequestController.current?.abort();
+    if (!isProvider) {
+      setWorkflows([]);
+      setOwnedFoods([]);
+      setLoading(false);
+      setError("");
+      return;
+    }
+
+    if (!localStorage.getItem("nourivya-token")) {
+      setError("Sign in with a provider account to load agent workflows.");
+      setLoading(false);
+      return;
+    }
+
+    const requestController = new AbortController();
+    workflowRequestController.current = requestController;
+    const timeoutId = window.setTimeout(
+      () => requestController.abort(),
+      AGENT_WORKFLOW_REQUEST_TIMEOUT_MS
+    );
+
+    try {
+      const [historyResponse, inventoryResponse] = await Promise.all([
+        getAgentWorkflowHistory(
+          { limit: 50 },
+          { signal: requestController.signal }
+        ),
+        getInventory({ signal: requestController.signal })
+      ]);
+      if (!historyResponse.success || !inventoryResponse.success) {
+        throw new Error("Could not load persisted agent workflow data.");
+      }
+
+      const foods = (inventoryResponse.data || []).filter((food) => {
+        const ownerId = food.providerOrganization?._id ||
+          food.providerOrganization;
+        return (
+          String(ownerId || "") === organizationId &&
+          food.status === "available"
+        );
+      });
+
+      if (requestId === requestGeneration.current) {
+        setWorkflows(historyResponse.data || []);
+        setOwnedFoods(foods);
+        setSelectedFoodId((previous) =>
+          foods.some((food) => String(food._id) === previous)
+            ? previous
+            : foods[0]?._id || ""
+        );
+        setError("");
+      }
+    } catch (loadError) {
+      const timedOut =
+        requestController.signal.aborted &&
+        loadError.name === "AbortError";
+      requestController.abort();
+      if (requestId === requestGeneration.current) {
+        setError(timedOut
+          ? AGENT_WORKFLOW_TIMEOUT_MESSAGE
+          : loadError.message || "Could not load agent workflows."
+        );
+      }
+    } finally {
+      window.clearTimeout(timeoutId);
+      if (workflowRequestController.current === requestController) {
+        workflowRequestController.current = null;
+      }
+      if (requestId === requestGeneration.current) {
+        setLoading(false);
+      }
+    }
+  }, [organizationId, isProvider]);
+
+  useEffect(() => {
+    const initialLoadId = window.setTimeout(loadWorkflowData, 0);
+    const intervalId = window.setInterval(loadWorkflowData, 30000);
+    return () => {
+      requestGeneration.current += 1;
+      workflowRequestController.current?.abort();
+      window.clearTimeout(initialLoadId);
+      window.clearInterval(intervalId);
+    };
+  }, [loadWorkflowData]);
+
+  const handleStartWorkflow = async (event) => {
+    event.preventDefault();
+    if (!selectedFoodId) return;
+
+    setSubmitting(true);
+    try {
+      const request = { foodId: selectedFoodId };
+      if (expectedDemand !== "") {
+        request.expectedDemand = Number(expectedDemand);
+      }
+      const response = await startAgentWorkflow(request);
+      addToast?.(
+        response.data?.message || "Agent workflow completed its current stage.",
+        response.data?.workflowStatus === "FAILED" ? "error" : "success"
+      );
+      setExpectedDemand("");
+      await loadWorkflowData();
+    } catch (submitError) {
+      addToast?.(
+        submitError.message || "Could not start the agent workflow.",
+        "error"
+      );
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleSafetyReview = async (review) => {
+    const key = `${review.executionId}:${review.foodId}`;
+    setReviewingKey(key);
+    try {
+      const { executionId, ...body } = review;
+      const response = await submitAgentWorkflowSafetyReview(
+        executionId,
+        body
+      );
+      addToast?.(
+        response.message || "Safety review recorded.",
+        body.reviewStatus === "rejected" ? "warning" : "success"
+      );
+      await loadWorkflowData();
+    } catch (reviewError) {
+      addToast?.(
+        reviewError.message || "Could not record the safety review.",
+        "error"
+      );
+    } finally {
+      setReviewingKey("");
+    }
+  };
+
+  const toggleWorkflowDetails = async (workflowId) => {
+    if (expandedWorkflowId === workflowId) {
+      setExpandedWorkflowId("");
+      return;
+    }
+    setDetailLoadingId(workflowId);
+    try {
+      const response = await getAgentWorkflow(workflowId);
+      setWorkflowDetails((previous) => ({
+        ...previous,
+        [workflowId]: response.data
+      }));
+      setExpandedWorkflowId(workflowId);
+    } catch (detailError) {
+      addToast?.(
+        detailError.message || "Could not load workflow details.",
+        "error"
+      );
+    } finally {
+      setDetailLoadingId("");
+    }
+  };
+
+  const formatDate = (value) => {
+    if (!value) return "—";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "—" : date.toLocaleString();
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "28px" }}>
+      <div>
+        <h2 style={{ fontSize: "24px", fontWeight: "900" }}>
+          Agentic AI Architecture & Activity
+        </h2>
+        <p style={{ fontSize: "14px", color: "var(--text-secondary)" }}>
+          Persisted workflow runs, agent handoffs, and human safety reviews.
+        </p>
+      </div>
+
+      {isProvider ? (
+        <section style={{
+          background: "var(--card-bg)",
+          padding: "22px",
+          borderRadius: "var(--radius-lg)",
+          border: "1px solid var(--border-color)",
+          boxShadow: "var(--shadow-card)"
+        }}>
+          <div style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: "12px",
+            flexWrap: "wrap",
+            marginBottom: "16px"
+          }}>
+            <div>
+              <h3>Persisted workflow history</h3>
+              <p style={{ color: "var(--text-secondary)", marginTop: "4px" }}>
+                Runs refresh automatically every 30 seconds.
+              </p>
+            </div>
+            <button type="button" onClick={loadWorkflowData}>
+              Refresh
+            </button>
+          </div>
+
+          <form
+            onSubmit={handleStartWorkflow}
+            style={{
+              display: "flex",
+              alignItems: "end",
+              gap: "12px",
+              flexWrap: "wrap",
+              padding: "14px",
+              background: "var(--page-bg)",
+              borderRadius: "var(--radius-md)",
+              marginBottom: "18px"
+            }}
+          >
+            <label style={{ display: "grid", gap: "6px", flex: "1 1 240px" }}>
+              Food listing
+              <select
+                value={selectedFoodId}
+                onChange={(event) => setSelectedFoodId(event.target.value)}
+                disabled={!ownedFoods.length || submitting}
+                required
+              >
+                {ownedFoods.map((food) => (
+                  <option key={food._id} value={food._id}>
+                    {food.foodName} — {food.quantity} {food.unit}
+                  </option>
+                ))}
+                {!ownedFoods.length && (
+                  <option value="">No available owned listings</option>
+                )}
+              </select>
+            </label>
+            <label style={{ display: "grid", gap: "6px", flex: "0 1 220px" }}>
+              Expected demand (optional)
+              <input
+                type="number"
+                min="0"
+                step="any"
+                value={expectedDemand}
+                onChange={(event) => setExpectedDemand(event.target.value)}
+                disabled={submitting}
+              />
+            </label>
+            <button
+              type="submit"
+              disabled={!selectedFoodId || submitting || !ownedFoods.length}
+            >
+              {submitting ? "Running agents..." : "Start workflow"}
+            </button>
+          </form>
+
+          {loading && <p>Loading saved workflows...</p>}
+          {!loading && error && (
+            <p role="alert" style={{ color: "var(--critical-red)" }}>{error}</p>
+          )}
+          {!loading && !error && workflows.length === 0 && (
+            <p>No persisted agent workflows for this organization yet.</p>
+          )}
+
+          <div style={{ display: "grid", gap: "14px" }}>
+            {workflows.map((workflow) => {
+              const workflowId = String(workflow._id);
+              const foodName = workflow.food?.foodName ||
+                workflow.food?.name ||
+                "Food listing";
+              const warnings =
+                workflow.latestSafetyAssessment?.assessments?.filter(
+                  (item) => item.safetyStatus === "WARNING"
+                ) || [];
+              const details = workflowDetails[workflowId];
+
+              return (
+                <article
+                  key={workflowId}
+                  style={{
+                    border: "1px solid var(--border-color)",
+                    borderRadius: "var(--radius-md)",
+                    padding: "16px"
+                  }}
+                >
+                  <div style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "start",
+                    gap: "12px",
+                    flexWrap: "wrap"
+                  }}>
+                    <div>
+                      <h4>{foodName}</h4>
+                      <p style={{ color: "var(--text-secondary)", marginTop: "4px" }}>
+                        Started {formatDate(workflow.startedAt || workflow.createdAt)}
+                      </p>
+                    </div>
+                    <span style={{
+                      ...workflowStatusColors(workflow.workflowStatus),
+                      padding: "5px 9px",
+                      borderRadius: "999px",
+                      fontSize: "12px",
+                      fontWeight: 700
+                    }}>
+                      {workflow.workflowStatus}
+                    </span>
+                  </div>
+                  <p style={{ marginTop: "10px" }}>
+                    {workflow.statusMessage || "No status message recorded."}
+                  </p>
+                  <p style={{ color: "var(--text-secondary)", marginTop: "6px" }}>
+                    Approval: {workflow.approvalStatus || "not_required"}
+                    {" · "}
+                    Agents recorded: {workflow.agentRuns?.length || 0}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => toggleWorkflowDetails(workflowId)}
+                    disabled={detailLoadingId === workflowId}
+                    style={{ marginTop: "12px" }}
+                  >
+                    {detailLoadingId === workflowId
+                      ? "Loading..."
+                      : expandedWorkflowId === workflowId
+                        ? "Hide details"
+                        : "View run details"}
+                  </button>
+
+                  {expandedWorkflowId === workflowId && details && (
+                    <div style={{
+                      display: "grid",
+                      gap: "10px",
+                      marginTop: "14px",
+                      paddingTop: "14px",
+                      borderTop: "1px solid var(--border-color)"
+                    }}>
+                      {(details.agentRuns || []).map((run, index) => (
+                        <div key={run._id || `${run.agent}-${index}`}>
+                          <strong>{run.agent}</strong>
+                          {" — "}
+                          {run.status}
+                          <span style={{ color: "var(--text-secondary)" }}>
+                            {" · "}
+                            {formatDate(run.completedAt || run.startedAt)}
+                          </span>
+                          {run.error && (
+                            <p style={{ color: "var(--critical-red)" }}>
+                              {run.error}
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {workflow.workflowStatus === "WAITING_FOR_APPROVAL" &&
+                    warnings.map((assessment) => (
+                      <WorkflowSafetyReviewForm
+                        key={`${workflowId}:${assessment.foodId}`}
+                        executionId={workflowId}
+                        assessment={assessment}
+                        submitting={
+                          reviewingKey === `${workflowId}:${assessment.foodId}`
+                        }
+                        onReview={handleSafetyReview}
+                      />
+                    ))}
+                </article>
+              );
+            })}
+          </div>
+        </section>
+      ) : (
+        <p>
+          Sign in with a provider account to run workflows and view persisted activity.
+        </p>
+      )}
+
+      <section>
+        <h3 style={{ marginBottom: "14px" }}>Agent definitions</h3>
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+          gap: "20px"
+        }}>
+          {appData.agents.map((ag) => (
+            <div key={ag.id} style={{
+              background: "var(--card-bg)",
+              padding: "24px",
+              borderRadius: "var(--radius-lg)",
+              border: "1px solid var(--border-color)",
+              boxShadow: "var(--shadow-card)",
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: "space-between"
+            }}>
+              <div>
+                <div style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  marginBottom: "12px"
+                }}>
+                  <span style={{
+                    fontSize: "11px",
+                    fontWeight: "800",
+                    background: "var(--light-green)",
+                    color: "var(--primary-green)",
+                    padding: "4px 8px",
+                    borderRadius: "4px"
+                  }}>
+                    {ag.id}
+                  </span>
+                  <span>{ag.status}</span>
+                </div>
+                <h4 style={{ fontSize: "18px", fontWeight: "800", marginBottom: "8px" }}>
+                  {ag.name}
+                </h4>
+                <p style={{
+                  fontSize: "13px",
+                  color: "var(--text-secondary)",
+                  marginBottom: "16px",
+                  lineHeight: "1.5"
+                }}>
+                  {ag.purpose}
+                </p>
+              </div>
+              <div style={{
+                background: "var(--page-bg)",
+                padding: "12px",
+                borderRadius: "var(--radius-sm)",
+                border: "1px solid var(--border-color)"
+              }}>
+                <p style={{
+                  fontSize: "11px",
+                  fontWeight: "700",
+                  color: "var(--text-secondary)",
+                  marginBottom: "4px"
+                }}>
+                  SAMPLE SUMMARY
+                </p>
+                <p style={{ fontSize: "12px", fontWeight: "600" }}>
+                  {ag.summary}
+                </p>
+              </div>
             </div>
           ))}
         </div>
-
-        {delivery.failureReason && (
-          <div style={{ padding: '16px', marginBottom: '20px', borderRadius: 'var(--radius-md)', background: '#FFF1F0', border: '1px solid #F5C2C0', color: '#9B2525' }}>
-            <strong>Delivery issue:</strong> {delivery.failureReason}
-          </div>
-        )}
-
-        <div style={{ width: '100%', minHeight: '220px', background: 'var(--page-bg)', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: '12px', padding: '24px', textAlign: 'center' }}>
-          <MapPin size={40} color="var(--primary-green)" />
-          <p style={{ fontSize: '16px', fontWeight: '700', color: 'var(--text-primary)' }}>
-            Map Preview — Simulation
-          </p>
-          <p style={{ fontSize: '13px', color: 'var(--text-secondary)', maxWidth: '560px' }}>
-            Pickup and destination addresses are shown above. Live GPS coordinates, actual route distance, and real-time driver location are not currently provided by the backend.
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-export function AgentActivityPage({ appData }) {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '28px' }}>
-      <div>
-        <h2 style={{ fontSize: '24px', fontWeight: '900' }}>Agentic AI Architecture & Activity</h2>
-        <p style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>Overview of the 7 specialized autonomous agents powering ResQMeal AI.</p>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '20px' }}>
-        {appData.agents.map((ag, i) => (
-          <div key={i} style={{ background: '#FFFFFF', padding: '24px', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border-color)', boxShadow: 'var(--shadow-card)', display: 'flex', flexDirection: 'column', justifyContent: 'space-between' }}>
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                <span style={{ fontSize: '11px', fontWeight: '800', background: 'var(--light-green)', color: 'var(--primary-green)', padding: '4px 8px', borderRadius: '4px' }}>{ag.id}</span>
-                <span style={{ 
-                  fontSize: '11px', fontWeight: '700', padding: '4px 8px', borderRadius: '12px',
-                  background: ag.status === 'Running' ? 'var(--light-green)' : ag.status === 'Completed' ? '#e2e8f0' : '#fef3c7',
-                  color: ag.status === 'Running' ? 'var(--primary-green)' : ag.status === 'Completed' ? '#475569' : 'var(--warning-amber)'
-                }}>
-                  {ag.status}
-                </span>
-              </div>
-              <h3 style={{ fontSize: '18px', fontWeight: '800', marginBottom: '8px' }}>{ag.name}</h3>
-              <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '16px', lineHeight: '1.5' }}>{ag.purpose}</p>
-            </div>
-            <div style={{ background: 'var(--page-bg)', padding: '12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }}>
-              <p style={{ fontSize: '11px', fontWeight: '700', color: 'var(--text-secondary)', marginBottom: '4px' }}>LATEST DECISION:</p>
-              <p style={{ fontSize: '12px', color: 'var(--text-primary)', fontWeight: '600' }}>{ag.summary}</p>
-            </div>
-          </div>
-        ))}
-      </div>
+      </section>
     </div>
   );
 }
 
 
-export function MonitoringPage({ setAppData }) {
+export function MonitoringPage({ setAppData, currentUser }) {
   const [incidents, setIncidents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [workflows, setWorkflows] = useState([]);
+  const [workflowLoading, setWorkflowLoading] = useState(false);
+  const [workflowError, setWorkflowError] = useState("");
+  const isProvider = currentUser?.role === "provider";
 
   useEffect(() => {
     let active = true;
@@ -3961,6 +5114,72 @@ export function MonitoringPage({ setAppData }) {
       active = false;
     };
   }, [setAppData]);
+
+  useEffect(() => {
+    let active = true;
+    let requestController = null;
+
+    const loadWorkflows = async () => {
+      if (!isProvider) {
+        requestController?.abort();
+        setWorkflows([]);
+        setWorkflowError("");
+        setWorkflowLoading(false);
+        return;
+      }
+
+      requestController?.abort();
+      const currentRequestController = new AbortController();
+      requestController = currentRequestController;
+      const timeoutId = window.setTimeout(
+        () => currentRequestController.abort(),
+        AGENT_WORKFLOW_REQUEST_TIMEOUT_MS
+      );
+      setWorkflowLoading(true);
+      try {
+        const response = await getAgentWorkflowHistory(
+          { limit: 20 },
+          { signal: currentRequestController.signal }
+        );
+        if (!response.success) {
+          throw new Error("Could not load persisted workflow statuses.");
+        }
+        if (active) {
+          setWorkflows(response.data || []);
+          setWorkflowError("");
+        }
+      } catch (loadError) {
+        const timedOut =
+          currentRequestController.signal.aborted &&
+          loadError.name === "AbortError";
+        currentRequestController.abort();
+        if (active) {
+          setWorkflowError(
+            timedOut
+              ? AGENT_WORKFLOW_TIMEOUT_MESSAGE
+              : loadError.message || "Could not load persisted workflow statuses."
+          );
+        }
+      } finally {
+        window.clearTimeout(timeoutId);
+        if (requestController === currentRequestController) {
+          requestController = null;
+        }
+        if (active) setWorkflowLoading(false);
+      }
+    };
+
+    loadWorkflows();
+    const intervalId = isProvider
+      ? window.setInterval(loadWorkflows, 30000)
+      : null;
+
+    return () => {
+      active = false;
+      requestController?.abort();
+      if (intervalId !== null) window.clearInterval(intervalId);
+    };
+  }, [isProvider]);
 
   const formatDate = (value) => {
     if (!value) return "—";
@@ -4035,6 +5254,51 @@ export function MonitoringPage({ setAppData }) {
           </div>
         )}
       </div>
+
+      <section>
+        <h3>Persisted agent workflows</h3>
+        {!isProvider && (
+          <p>Sign in with a provider account to view workflow statuses.</p>
+        )}
+        {isProvider && workflowLoading && (
+          <p>Loading saved workflow statuses...</p>
+        )}
+        {isProvider && !workflowLoading && workflowError && (
+          <p role="alert" style={{ color: "var(--critical-red)" }}>
+            {workflowError}
+          </p>
+        )}
+        {isProvider && !workflowLoading && !workflowError &&
+          workflows.length === 0 && (
+            <p>No persisted agent workflows have been recorded.</p>
+          )}
+        {isProvider && workflows.length > 0 && (
+          <div style={{ overflowX: "auto", marginTop: "12px" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  <th>Food listing</th>
+                  <th>Started</th>
+                  <th>Workflow status</th>
+                  <th>Safety approval</th>
+                  <th>Latest message</th>
+                </tr>
+              </thead>
+              <tbody>
+                {workflows.map((workflow) => (
+                  <tr key={workflow._id}>
+                    <td>{workflow.food?.foodName || "Food listing"}</td>
+                    <td>{formatDate(workflow.startedAt || workflow.createdAt)}</td>
+                    <td>{workflow.workflowStatus}</td>
+                    <td>{workflow.approvalStatus || "not_required"}</td>
+                    <td>{workflow.statusMessage || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
     </div>
   );
 }

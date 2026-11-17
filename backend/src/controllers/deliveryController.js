@@ -39,7 +39,9 @@ const createDelivery = async (req, res) => {
       });
     }
 
-    const donationRecord = await Donation.findById(donation);
+    const donationRecord = await Donation.findById(donation)
+      .populate("food", "pickupCoordinates")
+      .populate("recipient", "coordinates");
 
     if (!donationRecord) {
       return res.status(404).json({
@@ -122,6 +124,10 @@ const createDelivery = async (req, res) => {
         driver: driverId,
         pickupAddress: pickupAddress.trim(),
         deliveryAddress: deliveryAddress.trim(),
+        pickupCoordinates:
+          donationRecord.food?.pickupCoordinates?.toObject(),
+        deliveryCoordinates:
+          donationRecord.recipient?.coordinates?.toObject(),
         plannedPickupAt: plannedPickupAt || null,
         notes: notes || "",
         status: driverId ? "assigned" : "pending"

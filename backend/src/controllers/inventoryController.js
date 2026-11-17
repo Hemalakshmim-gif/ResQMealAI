@@ -1,6 +1,7 @@
 
 const mongoose = require("mongoose");
 const FoodInventory = require("../models/FoodInventory");
+const Organization = require("../models/Organization");
 
 // Validate expiry when food is marked as available.
 function validateAvailableFoodExpiry(expiryTime, status) {
@@ -28,6 +29,13 @@ function validateAvailableFoodExpiry(expiryTime, status) {
 // CREATE: Add a new food listing
 const createFood = async (req, res) => {
   try {
+    if (req.organization && req.organization.role !== "provider") {
+      return res.status(403).json({
+        success: false,
+        message: "Only provider organizations can create food listings."
+      });
+    }
+
     const expiryError = validateAvailableFoodExpiry(
       req.body.expiryTime,
       req.body.status || "available"
@@ -40,7 +48,24 @@ const createFood = async (req, res) => {
       });
     }
 
-    const food = await FoodInventory.create(req.body);
+    const foodData = { ...req.body };
+    delete foodData.providerOrganization;
+
+    if (req.organization) {
+      foodData.providerOrganization = req.organization.id;
+
+      if (!foodData.pickupCoordinates) {
+        const provider = await Organization.findById(req.organization.id)
+          .select("coordinates")
+          .lean();
+
+        if (provider?.coordinates) {
+          foodData.pickupCoordinates = provider.coordinates;
+        }
+      }
+    }
+
+    const food = await FoodInventory.create(foodData);
 
     return res.status(201).json({
       success: true,

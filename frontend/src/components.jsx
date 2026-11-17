@@ -37,8 +37,8 @@ export function Sidebar({ currentRoute, navigate, collapsed, setCollapsed, userR
       title: 'Logistics & AI Agents',
       items: [
         { label: 'Logistics & Fleet', path: '/logistics', icon: Truck, roles: ['admin'] },
-        { label: 'Agent Activity', path: '/agents', icon: Activity, roles: ['admin'] },
-        { label: 'Monitoring Center', path: '/monitoring', icon: Radio, roles: ['admin'] },
+        { label: 'Agent Activity', path: '/agents', icon: Activity, roles: ['admin', 'provider'] },
+        { label: 'Monitoring Center', path: '/monitoring', icon: Radio, roles: ['admin', 'provider'] },
         { label: 'Replanning Center', path: '/replanning', icon: Zap, roles: ['admin'] }
       ]
     },

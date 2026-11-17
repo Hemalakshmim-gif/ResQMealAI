@@ -1,5 +1,6 @@
 
 const mongoose = require("mongoose");
+const coordinatesSchema = require("./coordinatesSchema");
 
 const foodInventorySchema = new mongoose.Schema(
   {
@@ -27,10 +28,22 @@ const foodInventorySchema = new mongoose.Schema(
       trim: true
     },
 
+    providerOrganization: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Organization",
+      default: null,
+      index: true
+    },
+
     pickupAddress: {
       type: String,
       required: [true, "Pickup address is required"],
       trim: true
+    },
+
+    pickupCoordinates: {
+      type: coordinatesSchema,
+      default: undefined
     },
 
     expiryTime: {

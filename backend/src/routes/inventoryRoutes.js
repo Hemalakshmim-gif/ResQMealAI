@@ -8,11 +8,14 @@ const {
   updateFood,
   deleteFood
 } = require("../controllers/inventoryController");
+const {
+  authenticateOrganizationIfProvided
+} = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
 // Create a food listing
-router.post("/", createFood);
+router.post("/", authenticateOrganizationIfProvided, createFood);
 
 // Get all food listings
 router.get("/", getAllFood);

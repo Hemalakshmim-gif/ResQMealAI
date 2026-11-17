@@ -1,5 +1,50 @@
 
 const mongoose = require("mongoose");
+const coordinatesSchema = require("./coordinatesSchema");
+
+const locationSchema = new mongoose.Schema(
+  {
+    latitude: {
+      type: Number,
+      required: true,
+      min: -90,
+      max: 90
+    },
+    longitude: {
+      type: Number,
+      required: true,
+      min: -180,
+      max: 180
+    },
+    accuracy: {
+      type: Number,
+      required: true,
+      min: 0
+    },
+    heading: {
+      type: Number,
+      min: 0,
+      max: 360,
+      default: undefined
+    },
+    speed: {
+      type: Number,
+      min: 0,
+      default: undefined
+    },
+    updatedAt: {
+      type: Date,
+      required: true
+    }
+  },
+  { _id: false }
+);
+
+const TERMINAL_STATUSES = new Set([
+  "delivered",
+  "failed",
+  "cancelled"
+]);
 
 const deliverySchema = new mongoose.Schema(
   {
@@ -41,6 +86,16 @@ const deliverySchema = new mongoose.Schema(
       trim: true
     },
 
+    pickupCoordinates: {
+      type: coordinatesSchema,
+      default: undefined
+    },
+
+    deliveryCoordinates: {
+      type: coordinatesSchema,
+      default: undefined
+    },
+
     plannedPickupAt: {
       type: Date,
       default: null
@@ -62,6 +117,26 @@ const deliverySchema = new mongoose.Schema(
       default: ""
     },
 
+    latestLocation: {
+      type: locationSchema,
+      default: undefined
+    },
+
+    trackingActive: {
+      type: Boolean,
+      default: false
+    },
+
+    trackingStartedAt: {
+      type: Date,
+      default: null
+    },
+
+    trackingStoppedAt: {
+      type: Date,
+      default: null
+    },
+
     notes: {
       type: String,
       trim: true,
@@ -72,5 +147,40 @@ const deliverySchema = new mongoose.Schema(
     timestamps: true
   }
 );
+
+deliverySchema.pre("save", function stopTrackingOnTerminalSave() {
+  if (
+    this.isModified("status") &&
+    TERMINAL_STATUSES.has(this.status)
+  ) {
+    this.trackingActive = false;
+    this.trackingStoppedAt = new Date();
+  }
+});
+
+function stopTrackingOnTerminalUpdate() {
+  const update = this.getUpdate();
+
+  if (!update || Array.isArray(update)) {
+    return;
+  }
+
+  const nextStatus = update.$set?.status ?? update.status;
+
+  if (TERMINAL_STATUSES.has(nextStatus)) {
+    update.$set = {
+      ...(update.$set || {}),
+      trackingActive: false,
+      trackingStoppedAt: new Date()
+    };
+    this.setUpdate(update);
+  }
+}
+
+deliverySchema.pre(
+  "findOneAndUpdate",
+  stopTrackingOnTerminalUpdate
+);
+deliverySchema.pre("updateOne", stopTrackingOnTerminalUpdate);
 
 module.exports = mongoose.model("Delivery", deliverySchema);

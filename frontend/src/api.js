@@ -5,38 +5,89 @@ const API_BASE_URL =
 
 async function apiRequest(path, options = {}) {
   const token = localStorage.getItem("nourivya-token");
+  const driverToken = localStorage.getItem("nourivya-driver-token");
+  const isTrackingRequest = path.startsWith("/api/tracking/");
   const isAgentWorkflowRequest = path.startsWith("/api/agents/workflows");
   const isDriverRequest =
     path.startsWith("/api/driver-deliveries") ||
-    path === "/api/driver-auth/availability";
+    path === "/api/driver-auth/availability" ||
+    (isTrackingRequest && Boolean(driverToken));
+  const isOrganizationProfileUpdate =
+    path.startsWith("/api/organizations/") &&
+    options.method === "PATCH";
 
   const headers = {
     "Content-Type": "application/json",
     ...options.headers
   };
 
-  // Organization authentication
-if (
-  (path.startsWith("/api/settings") ||
-    path.startsWith("/api/food-safety/reviews") ||
-    isAgentWorkflowRequest) &&
-  token
-) {
-  headers.Authorization = `Bearer ${token}`;
-}
+  if (isTrackingRequest) {
+    const trackingToken = driverToken || token;
+    if (trackingToken) {
+      headers.Authorization = `Bearer ${trackingToken}`;
+    }
+  }
+
+  // Send organization identity to organization-owned endpoints.
+  if (
+    !isTrackingRequest &&
+    (path.startsWith("/api/settings") ||
+      path.startsWith("/api/inventory") ||
+      path.startsWith("/api/food-safety/reviews") ||
+      isAgentWorkflowRequest ||
+      isOrganizationProfileUpdate) &&
+    token
+  ) {
+    headers.Authorization = `Bearer ${token}`;
+  }
 
   // Driver credentials remain separate from organization credentials.
-  const driverToken = localStorage.getItem("nourivya-driver-token");
   if (isDriverRequest && driverToken) {
     headers.Authorization = `Bearer ${driverToken}`;
   }
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers
-  });
+  const trackingAbortController = isTrackingRequest
+    ? new AbortController()
+    : null;
+  const trackingRequestTimeout = trackingAbortController
+    ? window.setTimeout(() => trackingAbortController.abort(), 10000)
+    : null;
+  let response;
+  let result;
 
-  const result = await response.json().catch(() => ({}));
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
+      headers,
+      ...(trackingAbortController
+        ? { signal: trackingAbortController.signal }
+        : {})
+    });
+
+    try {
+      result = await response.json();
+    } catch {
+      if (trackingAbortController?.signal.aborted) {
+        const error = new Error("Tracking request timed out.");
+        error.code = "TRACKING_REQUEST_TIMEOUT";
+        throw error;
+      }
+
+      result = {};
+    }
+  } catch (requestError) {
+    if (trackingAbortController?.signal.aborted) {
+      const error = new Error("Tracking request timed out.");
+      error.code = "TRACKING_REQUEST_TIMEOUT";
+      throw error;
+    }
+
+    throw requestError;
+  } finally {
+    if (trackingRequestTimeout !== null) {
+      window.clearTimeout(trackingRequestTimeout);
+    }
+  }
 
   if (isDriverRequest && response.status === 401) {
     localStorage.removeItem("nourivya-driver-token");
@@ -45,17 +96,38 @@ if (
   }
 
   if (!response.ok) {
-    throw new Error(
+    const error = new Error(
       result.message || `Request failed: ${response.status}`
     );
+    error.code = result.code;
+    throw error;
   }
 
   return result;
 }
 
-export const getInventory = () => apiRequest("/api/inventory");
+export const getInventory = (options = {}) =>
+  apiRequest("/api/inventory", options);
 export const getDonations = () => apiRequest("/api/donations");
 export const getDeliveries = () => apiRequest("/api/deliveries");
+export const getTrackingSnapshot = (deliveryId) =>
+  apiRequest(
+    `/api/tracking/deliveries/${encodeURIComponent(deliveryId)}`
+  );
+export const getDeliveryRoute = (deliveryId) =>
+  apiRequest(
+    `/api/tracking/deliveries/${encodeURIComponent(deliveryId)}/route`
+  );
+export const startDeliveryTracking = (deliveryId) =>
+  apiRequest(
+    `/api/tracking/deliveries/${encodeURIComponent(deliveryId)}/start`,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+export const updateTrackingLocation = (deliveryId, location) =>
+  apiRequest(
+    `/api/tracking/deliveries/${encodeURIComponent(deliveryId)}/location`,
+    { method: "POST", body: JSON.stringify(location) }
+  );
 export const getDrivers = () => apiRequest("/api/drivers");
 
 export const getOrganizations = () =>
@@ -83,6 +155,48 @@ export const getInventorySurplusAnalysis = () =>
 export const getDemandMatchingAnalysis = () =>
   apiRequest("/api/agents/demand-matching/analyze");
 
+export const startAgentWorkflow = ({ foodId, expectedDemand }) =>
+  apiRequest("/api/agents/workflows", {
+    method: "POST",
+    body: JSON.stringify({ foodId, expectedDemand }),
+  });
+
+export const getAgentWorkflowHistory = ({
+  page = 1,
+  limit = 50,
+  status
+} = {}, requestOptions = {}) => {
+  const query = new URLSearchParams({
+    page: String(page),
+    limit: String(limit)
+  });
+  if (status) {
+    query.set("status", status);
+  }
+  return apiRequest(
+    `/api/agents/workflows?${query.toString()}`,
+    requestOptions
+  );
+};
+
+export const getAgentWorkflow = (executionId) =>
+  apiRequest(
+    `/api/agents/workflows/${encodeURIComponent(executionId)}`
+  );
+
+export const getAgentWorkflowStatus = (executionId) =>
+  apiRequest(
+    `/api/agents/workflows/${encodeURIComponent(executionId)}/status`
+  );
+
+export const submitAgentWorkflowSafetyReview = (executionId, review) =>
+  apiRequest(
+    `/api/agents/workflows/${encodeURIComponent(executionId)}/safety-review`,
+    {
+      method: "POST",
+      body: JSON.stringify(review),
+    }
+  );
 
 export const createFood = (food) =>
   apiRequest("/api/inventory", {
@@ -165,6 +279,12 @@ export const createOrganization = (organizationData) =>
 
 export const getOrganizationById = (id) =>
   apiRequest(`/api/organizations/${id}`);
+
+export const updateOrganization = (id, updates) =>
+  apiRequest(`/api/organizations/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(updates),
+  });
 
 
 export const loginOrganization = (credentials) =>

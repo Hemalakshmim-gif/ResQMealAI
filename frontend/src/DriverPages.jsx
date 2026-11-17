@@ -1,5 +1,5 @@
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Truck, Package, CheckCircle2, Clock, MapPin,
   RefreshCw, AlertCircle, User, Bike, Car, Calendar,
@@ -10,8 +10,11 @@ import {
   getMyDeliveries,
   updateMyDeliveryStatus,
   cancelMyDelivery,
-  updateMyAvailability
+  updateMyAvailability,
+  startDeliveryTracking,
+  updateTrackingLocation
 } from "./api.js";
+import { createTrackingSocket } from "./trackingSocket.js";
 
 const cardStyle = {
   background: "var(--card-bg, #FFFFFF)",
@@ -38,6 +41,104 @@ const formatDate = (value) => {
     ? "Not recorded"
     : date.toLocaleString();
 };
+
+const getPosition = () =>
+  new Promise((resolve, reject) => {
+    navigator.geolocation.getCurrentPosition(
+      resolve,
+      reject,
+      {
+        enableHighAccuracy: true,
+        maximumAge: 0,
+        timeout: 15000
+      }
+    );
+  });
+
+const getGeolocationError = (error) => {
+  if (error.code === 1) {
+    return "Location permission was denied. Allow location access to start tracking.";
+  }
+
+  if (error.code === 2) {
+    return "Your device could not determine a location. Check that GPS or location services are enabled.";
+  }
+
+  if (error.code === 3) {
+    return "Getting your location timed out. Try again when GPS reception improves.";
+  }
+
+  return "Your current location is unavailable.";
+};
+
+function connectSocket(socket) {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("Connection to the tracking service timed out."));
+    }, 12000);
+
+    const onConnect = () => {
+      cleanup();
+      resolve();
+    };
+
+    const onError = (error) => {
+      cleanup();
+      reject(new Error(error.message || "Could not connect to tracking."));
+    };
+
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      socket.off("connect", onConnect);
+      socket.off("connect_error", onError);
+    };
+
+    socket.once("connect", onConnect);
+    socket.once("connect_error", onError);
+    socket.connect();
+  });
+}
+
+function emitTrackingEvent(socket, event, payload) {
+  return new Promise((resolve, reject) => {
+    socket.timeout(10000).emit(event, payload, (timeoutError, response) => {
+      if (timeoutError) {
+        reject(new Error("The tracking service did not respond."));
+        return;
+      }
+
+      if (!response?.success) {
+        reject(new Error(response?.message || "Tracking request failed."));
+        return;
+      }
+
+      resolve(response.data);
+    });
+  });
+}
+
+function distanceBetweenMeters(first, second) {
+  const radians = (degrees) => (degrees * Math.PI) / 180;
+  const earthRadiusMeters = 6371000;
+  const latitudeDelta = radians(second.latitude - first.latitude);
+  const longitudeDelta = radians(second.longitude - first.longitude);
+  const haversine =
+    Math.sin(latitudeDelta / 2) ** 2 +
+    Math.cos(radians(first.latitude)) *
+      Math.cos(radians(second.latitude)) *
+      Math.sin(longitudeDelta / 2) ** 2;
+  const boundedHaversine = Math.min(1, haversine);
+
+  return (
+    2 *
+    earthRadiusMeters *
+    Math.atan2(
+      Math.sqrt(boundedHaversine),
+      Math.sqrt(1 - boundedHaversine)
+    )
+  );
+}
 
 const getId = (value) => {
   if (!value) return "";
@@ -212,13 +313,20 @@ function MetricCard({ title, value, icon: Icon, color }) {
   );
 }
 
-function DeliveryCard({ delivery, onUpdate, onCancel, busyId }) {
+function DeliveryCard({
+  delivery,
+  onUpdate,
+  onCancel,
+  onStartTracking,
+  trackingState,
+  busyId
+}) {
   const donation = getDonation(delivery);
   const food = donation.food || donation;
   const recipient = donation.recipient || delivery.recipient;
 
   const status = delivery.status;
-  const busy = busyId === getId(delivery);
+  const busy = Boolean(busyId);
 
   const nextStatus = {
     assigned: "picked_up",
@@ -439,6 +547,21 @@ function DeliveryCard({ delivery, onUpdate, onCancel, busyId }) {
         gap: "10px",
         flexWrap: "wrap"
       }}>
+        {["assigned", "picked_up", "in_transit"].includes(status) &&
+          !trackingState?.active && (
+            <button
+              disabled={busy}
+              onClick={() => onStartTracking(getId(delivery))}
+              style={{
+                ...buttonStyle,
+                background: "#2563EB",
+                opacity: busy ? 0.6 : 1
+              }}
+            >
+              {busy ? "Starting..." : "Start GPS Tracking"}
+            </button>
+          )}
+
         {nextStatus && (
           <button
             disabled={busy}
@@ -466,6 +589,45 @@ function DeliveryCard({ delivery, onUpdate, onCancel, busyId }) {
           </button>
         )}
       </div>
+
+      {["assigned", "picked_up", "in_transit"].includes(status) && (
+        <p style={{
+          marginTop: "10px",
+          color: "var(--text-secondary)",
+          fontSize: "12px"
+        }}>
+          Starting tracking requests your device location. Actual GPS updates
+          are shared with this delivery&apos;s linked provider and recipient while
+          this page remains open.
+        </p>
+      )}
+
+      {trackingState && (
+        <div
+          role="status"
+          style={{
+            marginTop: "12px",
+            padding: "12px",
+            borderRadius: "8px",
+            background: trackingState.error ? "#FEF2F2" : "#EFF6FF",
+            color: trackingState.error ? "#B91C1C" : "#1D4ED8",
+            fontSize: "13px"
+          }}
+        >
+          <strong>{trackingState.error ? "GPS tracking issue" : "GPS tracking"}</strong>
+          <p style={{ marginTop: "4px" }}>
+            {trackingState.error || trackingState.message}
+          </p>
+          {trackingState.lastUpdated && (
+            <p style={{ marginTop: "4px" }}>
+              Last sent: {formatDate(trackingState.lastUpdated)}
+              {Number.isFinite(trackingState.accuracy)
+                ? ` · Accuracy: ±${Math.round(trackingState.accuracy)} m`
+                : ""}
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -601,6 +763,460 @@ export function DriverDeliveriesPage({ user, setUser }) {
   const [message, setMessage] = useState("");
   const [cancelTarget, setCancelTarget] = useState("");
   const [cancelReason, setCancelReason] = useState("");
+  const [trackingStates, setTrackingStates] = useState({});
+  const trackingRefs = useRef(new Map());
+  const mountedRef = useRef(true);
+
+  const setTrackingState = (id, updates) => {
+    if (!mountedRef.current) {
+      return;
+    }
+
+    setTrackingStates((previous) => ({
+      ...previous,
+      [id]: {
+        ...previous[id],
+        ...updates
+      }
+    }));
+  };
+
+  const stopTrackingLocally = (id, statusMessage = "") => {
+    const tracking = trackingRefs.current.get(id);
+
+    if (tracking) {
+      tracking.started = false;
+      if (tracking.watchId !== null) {
+        navigator.geolocation.clearWatch(tracking.watchId);
+      }
+      tracking.socket.disconnect();
+      trackingRefs.current.delete(id);
+    }
+
+    setTrackingState(id, {
+      active: false,
+      error: false,
+      message: statusMessage
+    });
+  };
+
+  useEffect(() => {
+    mountedRef.current = true;
+    const activeTrackingRefs = trackingRefs.current;
+
+    return () => {
+      mountedRef.current = false;
+
+      for (const tracking of activeTrackingRefs.values()) {
+        tracking.started = false;
+        if (tracking.watchId !== null) {
+          navigator.geolocation.clearWatch(tracking.watchId);
+        }
+        tracking.socket.disconnect();
+      }
+      activeTrackingRefs.clear();
+    };
+  }, []);
+
+  const handleStartTracking = async (id) => {
+    let tracking;
+
+    try {
+      setBusyId(id);
+      setMessage("");
+      setTrackingState(id, {
+        active: false,
+        error: false,
+        message: "Checking device location..."
+      });
+
+      const isLocalhost = [
+        "localhost",
+        "127.0.0.1",
+        "::1"
+      ].includes(window.location.hostname);
+
+      if (
+        !navigator.geolocation ||
+        (!window.isSecureContext && !isLocalhost)
+      ) {
+        throw new Error(
+          "Location tracking requires GPS permission and a secure HTTPS connection, except on localhost."
+        );
+      }
+
+      const initialPosition = await getPosition();
+
+      if (!mountedRef.current) {
+        return;
+      }
+
+      const socket = createTrackingSocket();
+
+      tracking = {
+        socket,
+        watchId: null,
+        started: false,
+        sending: false,
+        usingRestFallback: false,
+        latestObservedLocation: null,
+        pendingLocation: null,
+        lastSentLocation: null,
+        lastSentAt: 0
+      };
+      trackingRefs.current.set(id, tracking);
+
+      const handleLocationConfirmed = (
+        location,
+        confirmedLocation,
+        usedRestFallback
+      ) => {
+        if (
+          tracking.pendingLocation?.latitude === location.latitude &&
+          tracking.pendingLocation?.longitude === location.longitude &&
+          tracking.pendingLocation?.accuracy === location.accuracy &&
+          tracking.pendingLocation?.heading === location.heading &&
+          tracking.pendingLocation?.speed === location.speed
+        ) {
+          tracking.pendingLocation = null;
+        }
+
+        tracking.lastSentLocation = location;
+        tracking.lastSentAt = Date.now();
+        tracking.usingRestFallback = usedRestFallback;
+        setTrackingState(id, {
+          active: true,
+          error: false,
+          message: usedRestFallback
+            ? "GPS updates are confirmed through the REST fallback."
+            : "GPS updates are being received by the backend.",
+          lastUpdated: confirmedLocation?.updatedAt || new Date(),
+          accuracy: confirmedLocation?.accuracy
+        });
+      };
+
+      const handleLocationFailure = (failure, location) => {
+        if (
+          [
+            "TRACKING_INACTIVE",
+            "DELIVERY_NOT_FOUND",
+            "DELIVERY_NOT_TRACKABLE",
+            "DRIVER_ACCESS_REQUIRED",
+            "AUTHENTICATION_REQUIRED",
+            "AUTHENTICATION_NOT_CONFIGURED",
+            "INVALID_SESSION",
+            "INVALID_DELIVERY_ID"
+          ].includes(failure?.code)
+        ) {
+          stopAfterTrackingError(
+            failure.message || "This delivery is no longer trackable."
+          );
+          return;
+        }
+
+        tracking.pendingLocation =
+          tracking.latestObservedLocation || location;
+        tracking.usingRestFallback = true;
+        setTrackingState(id, {
+          active: tracking.started,
+          error: true,
+          message:
+            failure?.message ||
+            "The backend did not confirm the latest GPS update."
+        });
+      };
+
+      const sendLocationViaRest = async (location) => {
+        if (tracking.sending) {
+          tracking.pendingLocation = location;
+          return;
+        }
+
+        tracking.sending = true;
+        tracking.usingRestFallback = true;
+        let sent = false;
+
+        try {
+          const response = await updateTrackingLocation(id, location);
+          if (!response?.success) {
+            throw new Error(
+              response?.message ||
+                "The REST fallback did not confirm the GPS update."
+            );
+          }
+
+          handleLocationConfirmed(
+            location,
+            response.data?.location,
+            true
+          );
+          sent = true;
+        } catch (error) {
+          handleLocationFailure(error, location);
+        } finally {
+          tracking.sending = false;
+          if (sent) {
+            flushPendingLocation();
+          }
+        }
+      };
+
+      const flushPendingLocation = () => {
+        if (
+          !tracking.started ||
+          tracking.sending ||
+          !tracking.pendingLocation
+        ) {
+          return;
+        }
+
+        const pendingLocation = tracking.pendingLocation;
+        tracking.pendingLocation = null;
+        sendLocation({ coords: pendingLocation });
+      };
+
+      const sendLocation = (position, force = false) => {
+        const coordinates = position.coords;
+        const location = {
+          latitude: coordinates.latitude,
+          longitude: coordinates.longitude,
+          accuracy: coordinates.accuracy,
+          heading: coordinates.heading,
+          speed: coordinates.speed
+        };
+        const now = Date.now();
+
+        tracking.latestObservedLocation = location;
+
+        const movedMeters = tracking.lastSentLocation
+          ? distanceBetweenMeters(
+              tracking.lastSentLocation,
+              location
+            )
+          : Number.POSITIVE_INFINITY;
+        const enoughTimePassed =
+          now - tracking.lastSentAt >= 15000;
+
+        if (
+          !force &&
+          movedMeters < 20 &&
+          !enoughTimePassed
+        ) {
+          return;
+        }
+
+        if (!socket.connected) {
+          tracking.pendingLocation = location;
+          if (tracking.started) {
+            sendLocationViaRest(location);
+            return;
+          }
+
+          setTrackingState(id, {
+            active: false,
+            error: false,
+            message: "Connecting to tracking; waiting to send the first GPS fix."
+          });
+          return;
+        }
+
+        if (tracking.sending) {
+          tracking.pendingLocation = location;
+          return;
+        }
+
+        tracking.sending = true;
+        socket.timeout(10000).emit(
+          "tracking:location",
+          { deliveryId: id, ...location },
+          (timeoutError, response) => {
+            tracking.sending = false;
+
+            if (timeoutError || !response?.success) {
+              if (timeoutError) {
+                tracking.usingRestFallback = true;
+                setTrackingState(id, {
+                  active: tracking.started,
+                  error: false,
+                  message: "Live update failed; retrying through REST."
+                });
+                sendLocationViaRest(
+                  tracking.latestObservedLocation || location
+                );
+                return;
+              }
+
+              handleLocationFailure(response, location);
+              return;
+            }
+
+            handleLocationConfirmed(
+              location,
+              response.data?.location,
+              false
+            );
+            flushPendingLocation();
+          }
+        );
+      };
+
+      const stopAfterTrackingError = (errorMessage) => {
+        tracking.started = false;
+        if (tracking.watchId !== null) {
+          navigator.geolocation.clearWatch(tracking.watchId);
+          tracking.watchId = null;
+        }
+        socket.disconnect();
+        trackingRefs.current.delete(id);
+        setTrackingState(id, {
+          active: false,
+          error: true,
+          message: errorMessage
+        });
+      };
+
+      socket.on("disconnect", () => {
+        if (tracking.started) {
+          tracking.usingRestFallback = true;
+          setTrackingState(id, {
+            active: true,
+            error: false,
+            message: "Live connection lost. Sending GPS through REST fallback."
+          });
+
+          const latestLocation =
+            tracking.pendingLocation ||
+            tracking.latestObservedLocation;
+          if (latestLocation) {
+            sendLocation({ coords: latestLocation }, true);
+          }
+        }
+      });
+
+      socket.on("connect_error", (error) => {
+        setTrackingState(id, {
+          active: tracking.started,
+          error: !tracking.usingRestFallback,
+          message: tracking.usingRestFallback
+            ? "Live connection unavailable. GPS updates are using REST fallback."
+            : error.message || "Could not connect to tracking."
+        });
+
+        if (tracking.started) {
+          const latestLocation =
+            tracking.pendingLocation ||
+            tracking.latestObservedLocation;
+          if (latestLocation) {
+            sendLocation({ coords: latestLocation }, true);
+          }
+        }
+      });
+
+      socket.on("tracking:error", (error) => {
+        setTrackingState(id, {
+          active: tracking.started,
+          error: true,
+          message: error.message || "The tracking service rejected a GPS update."
+        });
+      });
+
+      socket.on("connect", async () => {
+        if (!tracking.started) {
+          return;
+        }
+
+        try {
+          await emitTrackingEvent(socket, "tracking:start", {
+            deliveryId: id
+          });
+          tracking.usingRestFallback = false;
+          setTrackingState(id, {
+            active: true,
+            error: false,
+            message: "Tracking connection restored."
+          });
+
+          const latestLocation =
+            tracking.pendingLocation ||
+            tracking.latestObservedLocation;
+
+          if (latestLocation) {
+            sendLocation({ coords: latestLocation }, true);
+          }
+        } catch (error) {
+          stopAfterTrackingError(error.message);
+        }
+      });
+
+      setTrackingState(id, {
+        active: false,
+        error: false,
+        message: "Connecting securely to the tracking service..."
+      });
+
+      let startedViaRest = false;
+      try {
+        await connectSocket(socket);
+        await emitTrackingEvent(socket, "tracking:start", {
+          deliveryId: id
+        });
+      } catch {
+        await startDeliveryTracking(id);
+        startedViaRest = true;
+        tracking.usingRestFallback = true;
+      }
+
+      tracking.started = true;
+      if (startedViaRest && socket.connected) {
+        try {
+          await emitTrackingEvent(socket, "tracking:start", {
+            deliveryId: id
+          });
+          tracking.usingRestFallback = false;
+        } catch {
+          setTrackingState(id, {
+            active: true,
+            error: false,
+            message: "Live connection unavailable. GPS updates are using REST fallback."
+          });
+        }
+      }
+      sendLocation(initialPosition, true);
+      tracking.watchId = navigator.geolocation.watchPosition(
+        (position) => sendLocation(position),
+        (error) => {
+          stopAfterTrackingError(getGeolocationError(error));
+        },
+        {
+          enableHighAccuracy: true,
+          maximumAge: 0,
+          timeout: 20000
+        }
+      );
+    } catch (error) {
+      if (tracking) {
+        tracking.started = false;
+        if (tracking.watchId !== null) {
+          navigator.geolocation.clearWatch(tracking.watchId);
+        }
+        tracking.socket.disconnect();
+        trackingRefs.current.delete(id);
+      }
+
+      setTrackingState(id, {
+        active: false,
+        error: true,
+        message:
+          typeof error.code === "number"
+            ? getGeolocationError(error)
+            : error.message || "Could not start GPS tracking."
+      });
+    } finally {
+      if (mountedRef.current) {
+        setBusyId("");
+      }
+    }
+  };
 
   const handleUpdate = async (id, status) => {
     try {
@@ -611,6 +1227,10 @@ export function DriverDeliveriesPage({ user, setUser }) {
 
       if (!response.success) {
         throw new Error(response.message || "Could not update delivery.");
+      }
+
+      if (["delivered", "failed", "cancelled"].includes(status)) {
+        stopTrackingLocally(id, "Tracking stopped because the delivery ended.");
       }
 
       if (status === "delivered") {
@@ -646,6 +1266,11 @@ export function DriverDeliveriesPage({ user, setUser }) {
       if (!response.success) {
         throw new Error(response.message || "Could not cancel delivery.");
       }
+
+      stopTrackingLocally(
+        cancelTarget,
+        "Tracking stopped because the delivery was cancelled."
+      );
 
       setMessage("Delivery cancelled and released for reassignment.");
       const updatedUser = { ...user, status: "available" };
@@ -723,6 +1348,8 @@ export function DriverDeliveriesPage({ user, setUser }) {
                 key={getId(delivery)}
                 delivery={delivery}
                 onUpdate={handleUpdate}
+                onStartTracking={handleStartTracking}
+                trackingState={trackingStates[getId(delivery)]}
                 onCancel={(id) => {
                   setCancelTarget(id);
                   setCancelReason("");
@@ -754,6 +1381,8 @@ export function DriverDeliveriesPage({ user, setUser }) {
                 key={getId(delivery)}
                 delivery={delivery}
                 onUpdate={handleUpdate}
+                onStartTracking={handleStartTracking}
+                trackingState={trackingStates[getId(delivery)]}
                 onCancel={() => {}}
                 busyId={busyId}
               />

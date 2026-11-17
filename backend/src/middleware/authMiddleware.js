@@ -47,6 +47,14 @@ const authenticateOrganization = (req, res, next) => {
   }
 };
 
+const authenticateOrganizationIfProvided = (req, res, next) => {
+  if (!req.headers.authorization) {
+    return next();
+  }
+
+  return authenticateOrganization(req, res, next);
+};
+
 // DRIVER AUTHENTICATION
 const authenticateDriver = (req, res, next) => {
   try {
@@ -95,5 +103,6 @@ const authenticateDriver = (req, res, next) => {
 
 module.exports = {
   authenticateOrganization,
+  authenticateOrganizationIfProvided,
   authenticateDriver
 };

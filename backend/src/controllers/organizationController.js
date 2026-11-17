@@ -2,6 +2,21 @@
 const mongoose = require("mongoose");
 const Organization = require("../models/Organization");
 const bcrypt = require("bcryptjs");
+
+function isValidCoordinates(coordinates) {
+  return (
+    coordinates &&
+    typeof coordinates === "object" &&
+    !Array.isArray(coordinates) &&
+    Number.isFinite(coordinates.latitude) &&
+    coordinates.latitude >= -90 &&
+    coordinates.latitude <= 90 &&
+    Number.isFinite(coordinates.longitude) &&
+    coordinates.longitude >= -180 &&
+    coordinates.longitude <= 180
+  );
+}
+
 // CREATE: Register an organization
 // CREATE: Register an organization securely
 const createOrganization = async (req, res) => {
@@ -15,6 +30,7 @@ const createOrganization = async (req, res) => {
       phone,
       address,
       city,
+      coordinates,
       ...otherFields
     } = req.body;
 
@@ -33,6 +49,18 @@ const createOrganization = async (req, res) => {
         success: false,
         message:
           "Name, contact person, organization type, email, password, phone, address, and city are required."
+      });
+    }
+
+    if (
+      coordinates !== undefined &&
+      coordinates !== null &&
+      !isValidCoordinates(coordinates)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Coordinates must include a valid latitude and longitude."
       });
     }
 
@@ -69,6 +97,7 @@ const createOrganization = async (req, res) => {
       phone,
       address,
       city,
+      ...(coordinates ? { coordinates } : {}),
       ...otherFields
     });
 
@@ -164,21 +193,49 @@ const updateOrganization = async (req, res) => {
       });
     }
 
-    
-const allowedFields = [
-  "name",
-  "type",
-  "email",
-  "phone",
-  "address",
-  "city",
-  "acceptedFoodTypes",
-  "requestedFoodTypes",
-  "requestedMeals",
-  "capacityMeals",
-  "isActive"
-];
+    if (Object.prototype.hasOwnProperty.call(req.body, "coordinates")) {
+      if (!req.organization) {
+        return res.status(401).json({
+          success: false,
+          message:
+            "Authentication is required to update organization coordinates."
+        });
+      }
 
+      if (String(req.organization.id) !== String(id)) {
+        return res.status(403).json({
+          success: false,
+          message:
+            "You can only update your own organization coordinates."
+        });
+      }
+
+      if (
+        req.body.coordinates !== null &&
+        !isValidCoordinates(req.body.coordinates)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Coordinates must include a valid latitude and longitude."
+        });
+      }
+    }
+
+    const allowedFields = [
+      "name",
+      "type",
+      "email",
+      "phone",
+      "address",
+      "city",
+      "acceptedFoodTypes",
+      "requestedFoodTypes",
+      "requestedMeals",
+      "capacityMeals",
+      "isActive",
+      "coordinates"
+    ];
 
     const updates = {};
 
