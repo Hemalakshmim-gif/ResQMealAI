@@ -7,6 +7,7 @@ const FoodInventory = require("../models/FoodInventory");
 const {
   explainDriverRankings,
 } = require("./logisticsAIReasoning");
+const { createAgentResult } = require("./agentResult");
 
 const {
   analyzeFoodSafety,
@@ -14,6 +15,88 @@ const {
 
 const normalize = (value) =>
   String(value || "").trim().toLowerCase();
+
+const planMatchedDelivery = async ({
+  foodId,
+  foodName,
+  safetyStatus,
+  quantity,
+  unit,
+  pickupAddress,
+  deliveryAddress
+}) => {
+  const startedAt = new Date();
+
+  if (safetyStatus !== "SAFE") {
+    throw new Error("Logistics planning requires SAFE food.");
+  }
+
+  if (
+    typeof quantity !== "number" ||
+    !Number.isFinite(quantity) ||
+    quantity <= 0 ||
+    normalize(unit) !== "meals"
+  ) {
+    throw new Error(
+      "Logistics planning requires a positive meal quantity."
+    );
+  }
+
+  if (
+    typeof pickupAddress !== "string" ||
+    !pickupAddress.trim() ||
+    typeof deliveryAddress !== "string" ||
+    !deliveryAddress.trim()
+  ) {
+    throw new Error("Pickup and delivery addresses are required.");
+  }
+
+  const drivers = await Driver.find({ status: "available" }).lean();
+  const candidates = drivers
+    .filter(
+      (driver) =>
+        Number.isFinite(Number(driver.capacityMeals)) &&
+        Number(driver.capacityMeals) >= quantity
+    )
+    .map((driver) => ({
+      driverId: String(driver._id),
+      name: driver.name,
+      vehicleType: driver.vehicleType,
+      capacityMeals: Number(driver.capacityMeals),
+      capacityRemainder: Number(driver.capacityMeals) - quantity
+    }))
+    .sort(
+      (first, second) =>
+        first.capacityRemainder - second.capacityRemainder ||
+        first.driverId.localeCompare(second.driverId)
+    );
+
+  return createAgentResult({
+    agent: "Logistics Agent",
+    startedAt,
+    input: {
+      foodId: String(foodId || ""),
+      foodName: foodName || null,
+      quantity,
+      unit,
+      pickupAddress: pickupAddress.trim(),
+      deliveryAddress: deliveryAddress.trim()
+    },
+    output: {
+      assignmentStatus:
+        candidates.length > 0
+          ? "driver_candidate_found"
+          : "no_available_driver",
+      selectedDriver: candidates[0] || null,
+      candidateDrivers: candidates,
+      deliveryStatus: "pending",
+      reason:
+        candidates.length > 0
+          ? "Driver is recommended by available status and sufficient meal capacity; no assignment or delivery completion is claimed."
+          : "No available driver has sufficient meal capacity."
+    }
+  });
+};
 
 const planDeliveries = async () => {
   const [deliveries, drivers, safetyAnalysis] = await Promise.all([
@@ -237,4 +320,4 @@ const planDeliveries = async () => {
   };
 };
 
-module.exports = { planDeliveries };
+module.exports = { planDeliveries, planMatchedDelivery };

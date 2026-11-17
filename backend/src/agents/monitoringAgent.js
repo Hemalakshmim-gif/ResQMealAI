@@ -3,6 +3,16 @@ const FoodInventory = require("../models/FoodInventory");
 const Donation = require("../models/Donation");
 const Delivery = require("../models/Delivery");
 const { analyzeFoodSafety } = require("./foodSafetyEligibilityAgent");
+const { createAgentResult } = require("./agentResult");
+
+const WORKFLOW_AGENTS = [
+  "Restaurant Agent",
+  "Safety Agent",
+  "Demand Agent",
+  "Matching Agent",
+  "Logistics Agent",
+  "Monitoring Agent"
+];
 
 const DEFAULT_THRESHOLDS = {
   pendingDonationHours: 24,
@@ -410,7 +420,114 @@ async function monitorNourivya(options = {}) {
   };
 }
 
+function runMonitoringAgent({
+  agentResults,
+  workflowStatusOverride,
+  messageOverride
+}) {
+  const startedAt = new Date();
+
+  if (!Array.isArray(agentResults)) {
+    throw new Error("agentResults must be an array.");
+  }
+
+  const statusByAgent = new Map();
+  for (const result of agentResults) {
+    if (
+      !result ||
+      !WORKFLOW_AGENTS.includes(result.agent) ||
+      !["IDLE", "RUNNING", "COMPLETED", "FAILED", "WAITING_FOR_APPROVAL"]
+        .includes(result.status) ||
+      statusByAgent.has(result.agent)
+    ) {
+      throw new Error("Agent results contain an invalid status record.");
+    }
+    statusByAgent.set(result.agent, result.status);
+  }
+
+  const priorAgents = WORKFLOW_AGENTS.slice(0, -1);
+  const currentStatuses = Object.fromEntries(
+    priorAgents.map((agent) => [
+      agent,
+      statusByAgent.get(agent) || "IDLE"
+    ])
+  );
+  currentStatuses["Monitoring Agent"] = "COMPLETED";
+
+  const statuses = Object.values(currentStatuses);
+  const failed = statuses.includes("FAILED");
+  const waitingForApproval = statuses.includes("WAITING_FOR_APPROVAL");
+  const completedAgents = statuses.filter(
+    (status) => status === "COMPLETED"
+  ).length;
+  const receivedResults = agentResults.length > 0;
+  const deliveryResult = agentResults.find(
+    (result) => result.agent === "Logistics Agent"
+  );
+  const deliveryCompleted =
+    deliveryResult?.output?.deliveryStatus === "delivered";
+
+  const derivedWorkflowStatus = failed
+    ? "FAILED"
+    : waitingForApproval
+      ? "WAITING_FOR_APPROVAL"
+      : receivedResults && completedAgents === WORKFLOW_AGENTS.length &&
+          deliveryCompleted
+        ? "COMPLETED"
+        : receivedResults
+          ? "IN_PROGRESS"
+          : "IDLE";
+
+  const allowedWorkflowStatuses = new Set([
+    "IDLE",
+    "IN_PROGRESS",
+    "WAITING_FOR_APPROVAL",
+    "FAILED",
+    "COMPLETED",
+    "NO_SURPLUS",
+    "UNSAFE_FOOD",
+    "NO_RECIPIENT",
+    "NO_DRIVER_AVAILABLE"
+  ]);
+  if (
+    workflowStatusOverride !== undefined &&
+    !allowedWorkflowStatuses.has(workflowStatusOverride)
+  ) {
+    throw new Error("workflowStatusOverride is invalid.");
+  }
+
+  const workflowStatus =
+    workflowStatusOverride || derivedWorkflowStatus;
+  const derivedMessage = failed
+    ? "The workflow has a failed agent and requires attention."
+    : waitingForApproval
+      ? "The workflow is paused for human food-safety approval."
+      : workflowStatus === "COMPLETED"
+        ? "The delivery has been completed."
+        : receivedResults
+          ? "The workflow is progressing; delivery completion is not yet confirmed."
+          : "No agent workflow activity has been recorded.";
+  const message = messageOverride || derivedMessage;
+
+  return createAgentResult({
+    agent: "Monitoring Agent",
+    startedAt,
+    input: {
+      agentStatuses: Object.fromEntries(statusByAgent)
+    },
+    output: {
+      workflowStatus,
+      completedAgents,
+      totalAgents: WORKFLOW_AGENTS.length,
+      agentStatuses: currentStatuses,
+      message
+    }
+  });
+}
+
 module.exports = {
   monitorNourivya,
-  DEFAULT_THRESHOLDS
+  runMonitoringAgent,
+  DEFAULT_THRESHOLDS,
+  WORKFLOW_AGENTS
 };
