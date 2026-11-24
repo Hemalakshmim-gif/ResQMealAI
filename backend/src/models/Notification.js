@@ -59,6 +59,13 @@ const notificationSchema = new mongoose.Schema(
       default: ""
     },
 
+    recipientOrganization: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Organization",
+      default: null,
+      index: true
+    },
+
     read: {
       type: Boolean,
       default: false

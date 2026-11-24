@@ -3,6 +3,17 @@ const Donation = require("../models/Donation");
 const Delivery = require("../models/Delivery");
 const Organization = require("../models/Organization");
 
+// EPA WARM food-donation avoided-landfilling factors (MTCO2e per US short ton).
+// The factors assume a US national-average landfill mix; this is an estimate,
+// not a direct measurement or a location-specific lifecycle assessment.
+const EPA_WARM_MTCO2E_PER_SHORT_TON = {
+  default: 0.43,
+  bakery: 0.43,
+  produce: 0.44,
+  dairy: 0.42
+};
+const KG_PER_US_SHORT_TON = 907.18474;
+
 const getImpactAnalytics = async (req, res) => {
   try {
     // Count delivered donations and sum quantities that are explicitly
@@ -11,17 +22,55 @@ const getImpactAnalytics = async (req, res) => {
       status: "delivered",
       notes: { $not: /^driver-demo:/ }
     })
-      .populate("food", "unit")
+      .populate("food", "unit foodType quantity weightKg")
       .lean();
 
     let totalMealsRedistributed = 0;
     let deliveredDonationCount = 0;
+    let measuredFoodKg = 0;
+    let donationsWithMeasuredWeight = 0;
+    let co2eAvoidedKg = 0;
 
     for (const donation of deliveredDonations) {
       deliveredDonationCount += 1;
 
       if (donation.food?.unit === "meals") {
         totalMealsRedistributed += Number(donation.quantity) || 0;
+      }
+
+      const food = donation.food;
+      const quantity = Number(donation.quantity);
+      const listedQuantity = Number(food?.quantity);
+      let donationWeightKg = null;
+
+      if (
+        food?.unit === "kg" &&
+        Number.isFinite(quantity) && quantity > 0
+      ) {
+        donationWeightKg = quantity;
+      } else if (
+        food?.unit === "grams" &&
+        Number.isFinite(quantity) && quantity > 0
+      ) {
+        donationWeightKg = quantity / 1000;
+      } else if (
+        Number.isFinite(Number(food?.weightKg)) &&
+        Number(food.weightKg) > 0 &&
+        Number.isFinite(quantity) && quantity > 0 &&
+        Number.isFinite(listedQuantity) && listedQuantity > 0
+      ) {
+        // The provider recorded the measured mass of the entire listing.
+        // Allocate the corresponding fraction to this delivered donation.
+        donationWeightKg = Number(food.weightKg) * quantity / listedQuantity;
+      }
+
+      if (Number.isFinite(donationWeightKg) && donationWeightKg > 0) {
+        const factor =
+          EPA_WARM_MTCO2E_PER_SHORT_TON[food?.foodType] ??
+          EPA_WARM_MTCO2E_PER_SHORT_TON.default;
+        measuredFoodKg += donationWeightKg;
+        co2eAvoidedKg += donationWeightKg * factor * 1000 / KG_PER_US_SHORT_TON;
+        donationsWithMeasuredWeight += 1;
       }
     }
 
@@ -72,8 +121,6 @@ const getImpactAnalytics = async (req, res) => {
         })
       ]);
 
-    // We don't have a verified emissions factor or reliable food mass
-    // for every unit, so do not invent a CO2 estimate.
     return res.status(200).json({
       success: true,
       data: {
@@ -84,9 +131,17 @@ const getImpactAnalytics = async (req, res) => {
         successfulDeliveryRate,
         successfulDeliveries: outcome.successful,
         deliveryOutcomes: outcome.total,
-        co2EmissionsAvoidedTons: null,
-        co2Explanation:
-          "Unavailable: a documented emissions factor and compatible food quantity data are required."
+        co2EmissionsAvoidedKg: donationsWithMeasuredWeight > 0
+          ? Number(co2eAvoidedKg.toFixed(2))
+          : null,
+        measuredFoodKg: donationsWithMeasuredWeight > 0
+          ? Number(measuredFoodKg.toFixed(2))
+          : null,
+        donationsWithMeasuredWeight,
+        donationsMissingWeight: deliveredDonationCount - donationsWithMeasuredWeight,
+        co2Explanation: donationsWithMeasuredWeight > 0
+          ? "Estimated landfill emissions avoided from measured delivered food weight using EPA WARM food-donation factors and a US national-average landfill baseline. This is CO2-equivalent (CO2e), not a direct measurement; transport emissions and avoided food production are not included."
+          : "No delivered food has recorded weight data yet. CO2e will be estimated when donated quantity is recorded in kg/grams or a measured total listing weight in kg is entered."
       }
     });
   } catch (error) {

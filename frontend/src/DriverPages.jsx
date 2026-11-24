@@ -12,9 +12,11 @@ import {
   cancelMyDelivery,
   updateMyAvailability,
   startDeliveryTracking,
-  updateTrackingLocation
+  updateTrackingLocation,
+  optimizeMyDeliveryRoute
 } from "./api.js";
 import { createTrackingSocket } from "./trackingSocket.js";
+import LiveTrackingMap from "./components/tracking/LiveTrackingMap.jsx";
 
 const cardStyle = {
   background: "var(--card-bg, #FFFFFF)",
@@ -764,6 +766,8 @@ export function DriverDeliveriesPage({ user, setUser }) {
   const [cancelTarget, setCancelTarget] = useState("");
   const [cancelReason, setCancelReason] = useState("");
   const [trackingStates, setTrackingStates] = useState({});
+  const [routePlan, setRoutePlan] = useState(null);
+  const [routeBusy, setRouteBusy] = useState(false);
   const trackingRefs = useRef(new Map());
   const mountedRef = useRef(true);
 
@@ -1290,6 +1294,31 @@ export function DriverDeliveriesPage({ user, setUser }) {
     d => ["pending", "assigned", "picked_up", "in_transit"].includes(d.status)
   );
 
+  const routeDeliveries = activeDeliveries.filter(
+    d => ["assigned", "picked_up", "in_transit"].includes(d.status)
+  );
+
+  const handleOptimizeRoute = async () => {
+    if (routeDeliveries.length === 0) {
+      setMessage("There are no active assigned deliveries to route.");
+      return;
+    }
+    if (routeDeliveries.length > 6) {
+      setMessage("Route optimization supports up to 6 active deliveries at a time.");
+      return;
+    }
+    setRouteBusy(true);
+    setMessage("");
+    try {
+      const response = await optimizeMyDeliveryRoute(routeDeliveries.map(getId));
+      setRoutePlan(response.data);
+    } catch (err) {
+      setMessage(err.message || "Could not optimize the delivery route.");
+    } finally {
+      setRouteBusy(false);
+    }
+  };
+
   const pastDeliveries = deliveries.filter(
     d => ["delivered", "failed", "cancelled"].includes(d.status)
   );
@@ -1300,10 +1329,20 @@ export function DriverDeliveriesPage({ user, setUser }) {
         title="My Deliveries"
         subtitle="View and manage the deliveries assigned to your account."
         action={
-          <button style={buttonStyle} onClick={refresh}>
-            <RefreshCw size={15} style={{ display: "inline", marginRight: "7px" }} />
-            Refresh
-          </button>
+          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+            <button
+              style={{ ...buttonStyle, opacity: routeBusy ? 0.65 : 1 }}
+              onClick={handleOptimizeRoute}
+              disabled={routeBusy || routeDeliveries.length === 0 || routeDeliveries.length > 6}
+            >
+              <Navigation size={15} style={{ display: "inline", marginRight: "7px" }} />
+              {routeBusy ? "Planning route…" : "Optimize route"}
+            </button>
+            <button style={buttonStyle} onClick={refresh}>
+              <RefreshCw size={15} style={{ display: "inline", marginRight: "7px" }} />
+              Refresh
+            </button>
+          </div>
         }
       />
 
@@ -1318,6 +1357,35 @@ export function DriverDeliveriesPage({ user, setUser }) {
         }}>
           {error || message}
         </div>
+      )}
+
+      {routePlan && (
+        <section style={{ ...cardStyle, marginBottom: "22px" }} aria-label="Optimized route">
+          <div style={{ display: "flex", justifyContent: "space-between", gap: "12px", flexWrap: "wrap" }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: "17px", fontWeight: "800" }}>Suggested stop order</h3>
+              <p style={{ margin: "6px 0 0", color: "var(--text-secondary)", fontSize: "12px" }}>
+                {routePlan.aiOptimizationUsed ? "AI-ranked stop order" : "Rule-based stop order"}
+                {routePlan.trafficAware ? " · Traffic-aware estimate" : " · Live traffic not included"}
+              </p>
+            </div>
+            <strong>
+              {(routePlan.totalDistanceMeters / 1000).toFixed(1)} km · {Math.max(1, Math.round(routePlan.totalDurationSeconds / 60))} min
+            </strong>
+          </div>
+          <LiveTrackingMap routePlan={routePlan} />
+          <ol style={{ paddingLeft: "22px", margin: "16px 0 0" }}>
+            {(routePlan.stops || []).map((stop, index) => (
+              <li key={`${stop.deliveryId}-${stop.kind}-${index}`} style={{ marginBottom: "10px" }}>
+                <strong>{stop.kind === "pickup" ? "Pick up" : "Deliver"}: {stop.foodName}</strong>
+                <span style={{ color: "var(--text-secondary)", fontSize: "13px" }}>
+                  {` · ETA ${new Date(stop.eta).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`}
+                  {stop.expiryFeasible === false ? " · May arrive after expiry" : ""}
+                </span>
+              </li>
+            ))}
+          </ol>
+        </section>
       )}
 
       {loading ? (

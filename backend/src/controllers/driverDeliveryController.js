@@ -4,6 +4,7 @@ const mongoose = require("mongoose");
 const Delivery = require("../models/Delivery");
 const Donation = require("../models/Donation");
 const Driver = require("../models/Driver");
+const { notifyRecipientOfProgress } = require("../services/deliveryProgressNotificationService");
 
 // GET DELIVERIES ASSIGNED TO THE LOGGED-IN DRIVER
 const getMyDeliveries = async (req, res) => {
@@ -163,16 +164,25 @@ const updateMyDeliveryStatus = async (req, res) => {
       donation.deliveredAt = updatedAt;
       await donation.save();
 
-      await Driver.findOneAndUpdate(
-        {
-          _id: req.driver.id,
-          status: "assigned"
-        },
-        {
-          $set: { status: "available" }
-        }
-      );
+      const otherActiveDeliveries = await Delivery.exists({
+        _id: { $ne: updatedDelivery._id },
+        driver: req.driver.id,
+        status: { $in: ["assigned", "picked_up", "in_transit"] }
+      });
+      if (!otherActiveDeliveries) {
+        await Driver.findOneAndUpdate(
+          { _id: req.driver.id, status: "assigned" },
+          { $set: { status: "available" } }
+        );
+      }
     }
+
+    await notifyRecipientOfProgress({
+      deliveryId: updatedDelivery._id,
+      event: status
+    }).catch((error) => {
+      console.error("Could not create recipient progress notification:", error.message);
+    });
 
     return res.status(200).json({
       success: true,
@@ -257,15 +267,24 @@ const cancelMyDelivery = async (req, res) => {
     }
 
     // Release the driver for another assignment.
-    await Driver.findOneAndUpdate(
-      {
-        _id: req.driver.id,
-        status: "assigned"
-      },
-      {
-        $set: { status: "available" }
-      }
-    );
+    const otherActiveDeliveries = await Delivery.exists({
+      _id: { $ne: updatedDelivery._id },
+      driver: req.driver.id,
+      status: { $in: ["assigned", "picked_up", "in_transit"] }
+    });
+    if (!otherActiveDeliveries) {
+      await Driver.findOneAndUpdate(
+        { _id: req.driver.id, status: "assigned" },
+        { $set: { status: "available" } }
+      );
+    }
+
+    await notifyRecipientOfProgress({
+      deliveryId: updatedDelivery._id,
+      event: "failed"
+    }).catch((error) => {
+      console.error("Could not create recipient cancellation notification:", error.message);
+    });
 
     return res.status(200).json({
       success: true,

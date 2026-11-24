@@ -154,6 +154,7 @@ const updateFood = async (req, res) => {
       "foodName",
       "quantity",
       "unit",
+      "weightKg",
       "providerName",
       "pickupAddress",
       "expiryTime",

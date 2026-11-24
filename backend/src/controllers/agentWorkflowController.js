@@ -413,12 +413,24 @@ async function reviewAgentWorkflowSafety(req, res) {
       : hasPendingReview
         ? "pending"
         : "approved";
-    const workflowStatus = rejected ? "UNSAFE_FOOD" : "WAITING_FOR_APPROVAL";
+    const shouldResume =
+      reviewStatus === "approved" &&
+      !hasPendingReview &&
+      !hasUnsafeFood;
+    const workflowStatus = rejected
+      ? "UNSAFE_FOOD"
+      : hasPendingReview
+        ? "WAITING_FOR_APPROVAL"
+        : shouldResume
+          ? "RUNNING"
+          : "WAITING_FOR_APPROVAL";
     const statusMessage = rejected
       ? "Safety review rejected or food eligibility failed; the workflow was stopped."
       : hasPendingReview
         ? "Safety review recorded; other food items remain under review."
-        : "Safety review approved; the workflow remains paused until it is resumed.";
+        : shouldResume
+          ? "Safety review approved; the workflow is continuing with demand matching."
+          : "The workflow is still waiting for a required safety review.";
     const update = {
       $set: {
         latestSafetyAssessment: safetyAssessment,
@@ -454,6 +466,27 @@ async function reviewAgentWorkflowSafety(req, res) {
       });
     }
 
+    if (shouldResume) {
+      const resumed = await runFoodRescueWorkflow({
+        foodId: String(food._id),
+        providerOrganizationId: req.organization.id,
+        resumeExecutionId: String(updatedWorkflow._id)
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: resumed.message,
+        data: {
+          ...resumed,
+          executionId: String(updatedWorkflow._id),
+          reviewId: String(review._id),
+          reviewStatus,
+          approvalStatus,
+          workflowStatus: resumed.workflowStatus
+        }
+      });
+    }
+
     return res.status(200).json({
       success: true,
       message: statusMessage,
@@ -463,11 +496,84 @@ async function reviewAgentWorkflowSafety(req, res) {
         reviewId: String(review._id),
         reviewStatus,
         approvalStatus,
-        workflowStatus
+        workflowStatus,
+        message: statusMessage
       }
     });
   } catch (error) {
     return sendWorkflowError(res, error, "Reviewing agent workflow safety");
+  }
+}
+
+async function resumeApprovedAgentWorkflow(req, res) {
+  const { executionId } = req.params;
+  if (!mongoose.isValidObjectId(executionId)) {
+    return res.status(400).json({
+      success: false,
+      code: "INVALID_WORKFLOW_ID",
+      message: "A valid workflow ID is required."
+    });
+  }
+
+  try {
+    const workflow = await AgentExecution.findOne({
+      _id: executionId,
+      providerOrganization: req.organization.id,
+      workflowStatus: "WAITING_FOR_APPROVAL",
+      approvalStatus: "approved"
+    }).lean();
+    if (!workflow) {
+      return res.status(409).json({
+        success: false,
+        code: "WORKFLOW_NOT_APPROVED_FOR_RESUME",
+        message: "Only a safety-approved workflow that is still paused can be resumed."
+      });
+    }
+
+    const assessments = workflow.latestSafetyAssessment?.assessments || [];
+    if (
+      assessments.length === 0 ||
+      assessments.some((assessment) => assessment.safetyStatus !== "SAFE")
+    ) {
+      return res.status(409).json({
+        success: false,
+        code: "WORKFLOW_SAFETY_NOT_COMPLETE",
+        message: "Every food item must pass safety review before the workflow can resume."
+      });
+    }
+
+    const claimedWorkflow = await AgentExecution.findOneAndUpdate(
+      {
+        _id: executionId,
+        providerOrganization: req.organization.id,
+        workflowStatus: "WAITING_FOR_APPROVAL",
+        approvalStatus: "approved"
+      },
+      {
+        $set: {
+          workflowStatus: "RUNNING",
+          statusMessage: "Safety approved; continuing demand matching and logistics.",
+          failureReason: ""
+        }
+      },
+      { returnDocument: "after", runValidators: true }
+    );
+    if (!claimedWorkflow) {
+      return res.status(409).json({
+        success: false,
+        code: "WORKFLOW_CHANGED",
+        message: "The workflow changed before it could be resumed. Refresh and try again."
+      });
+    }
+
+    const resumed = await runFoodRescueWorkflow({
+      foodId: String(claimedWorkflow.food),
+      providerOrganizationId: req.organization.id,
+      resumeExecutionId: String(claimedWorkflow._id)
+    });
+    return res.status(200).json({ success: true, data: resumed, message: resumed.message });
+  } catch (error) {
+    return sendWorkflowError(res, error, "Resuming approved agent workflow");
   }
 }
 
@@ -476,5 +582,6 @@ module.exports = {
   getAgentWorkflowHistory,
   getAgentWorkflow,
   getAgentWorkflowStatus,
-  reviewAgentWorkflowSafety
+  reviewAgentWorkflowSafety,
+  resumeApprovedAgentWorkflow
 };

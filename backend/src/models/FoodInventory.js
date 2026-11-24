@@ -18,8 +18,16 @@ const foodInventorySchema = new mongoose.Schema(
 
     unit: {
       type: String,
-      enum: ["kg", "grams", "litres", "meals", "packets"],
+      enum: ["kg", "grams", "litres", "meals", "packets", "items"],
       default: "kg"
+    },
+
+    // Measured total edible food mass for listings counted in meals,
+    // packets, or volume units. Enables weight-based impact calculations.
+    weightKg: {
+      type: Number,
+      min: [0.001, "Measured food weight must be greater than zero"],
+      default: null
     },
 
     providerName: {

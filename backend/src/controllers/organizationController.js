@@ -282,6 +282,94 @@ const updateOrganization = async (req, res) => {
   }
 };
 
+const RECIPIENT_ORGANIZATION_TYPES = new Set(["ngo", "food_bank", "shelter"]);
+const MATCHABLE_FOOD_TYPES = new Set([
+  "cooked", "raw", "packaged", "bakery", "dairy", "produce", "other"
+]);
+
+const getMyRecipientRequirements = async (req, res) => {
+  if (req.organization?.role !== "recipient") {
+    return res.status(403).json({
+      success: false,
+      message: "Sign in with an NGO, food bank, or shelter recipient account."
+    });
+  }
+
+  try {
+    const organization = await Organization.findById(req.organization.id)
+      .select("name type acceptedFoodTypes requestedFoodTypes requestedMeals capacityMeals")
+      .lean();
+    if (!organization || !RECIPIENT_ORGANIZATION_TYPES.has(organization.type)) {
+      return res.status(404).json({ success: false, message: "Recipient organization not found." });
+    }
+    return res.status(200).json({ success: true, data: organization });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: "Could not load recipient requirements.",
+      error: error.message
+    });
+  }
+};
+
+const updateMyRecipientRequirements = async (req, res) => {
+  if (req.organization?.role !== "recipient") {
+    return res.status(403).json({
+      success: false,
+      message: "Only a signed-in recipient organization can update these requirements."
+    });
+  }
+
+  const { capacityMeals, requestedMeals, foodTypes } = req.body || {};
+  if (!Number.isInteger(capacityMeals) || capacityMeals < 1) {
+    return res.status(400).json({ success: false, message: "Daily meal capacity must be a positive whole number." });
+  }
+  if (!Number.isInteger(requestedMeals) || requestedMeals < 0) {
+    return res.status(400).json({ success: false, message: "Meal demand must be a non-negative whole number." });
+  }
+  if (
+    !Array.isArray(foodTypes) ||
+    foodTypes.length === 0 ||
+    foodTypes.some((type) => !MATCHABLE_FOOD_TYPES.has(type))
+  ) {
+    return res.status(400).json({ success: false, message: "Select at least one valid food type." });
+  }
+
+  try {
+    const organization = await Organization.findOneAndUpdate(
+      {
+        _id: req.organization.id,
+        type: { $in: [...RECIPIENT_ORGANIZATION_TYPES] },
+        isActive: true
+      },
+      {
+        $set: {
+          capacityMeals,
+          requestedMeals,
+          acceptedFoodTypes: foodTypes,
+          requestedFoodTypes: foodTypes
+        }
+      },
+      { returnDocument: "after", runValidators: true }
+    ).select("name type acceptedFoodTypes requestedFoodTypes requestedMeals capacityMeals");
+
+    if (!organization) {
+      return res.status(404).json({ success: false, message: "Active recipient organization not found." });
+    }
+    return res.status(200).json({
+      success: true,
+      message: "Recipient matching requirements saved.",
+      data: organization
+    });
+  } catch (error) {
+    return res.status(400).json({
+      success: false,
+      message: "Could not save recipient requirements.",
+      error: error.message
+    });
+  }
+};
+
 // DELETE: Delete an organization
 const deleteOrganization = async (req, res) => {
   try {
@@ -322,5 +410,7 @@ module.exports = {
   getAllOrganizations,
   getOrganizationById,
   updateOrganization,
-  deleteOrganization
+  deleteOrganization,
+  getMyRecipientRequirements,
+  updateMyRecipientRequirements
 };

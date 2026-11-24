@@ -8,6 +8,7 @@ const { loadAuthorizedDelivery } = require("../services/trackingAccess");
 const {
   getAuthorizedDeliveryRoute
 } = require("../services/trackingRouteService");
+const { optimizeDriverRoute } = require("../services/multiStopRouteService");
 
 function sendTrackingError(res, error) {
   if (
@@ -49,6 +50,19 @@ async function getTrackingRoute(req, res) {
       req.trackingUser
     );
 
+    return res.status(200).json({ success: true, data });
+  } catch (error) {
+    return sendTrackingError(res, error);
+  }
+}
+
+async function optimizeTrackingRoute(req, res) {
+  if (!requireDriver(req, res)) return undefined;
+  try {
+    const data = await optimizeDriverRoute({
+      driverId: req.trackingUser.id,
+      deliveryIds: req.body?.deliveryIds
+    });
     return res.status(200).json({ success: true, data });
   } catch (error) {
     return sendTrackingError(res, error);
@@ -132,6 +146,7 @@ async function updateTrackingLocation(req, res) {
 module.exports = {
   getTrackingSnapshot,
   getTrackingRoute,
+  optimizeTrackingRoute,
   startDeliveryTracking,
   updateTrackingLocation
 };

@@ -1,4 +1,5 @@
 const mongoose = require("mongoose");
+const AgentExecution = require("../models/AgentExecution");
 const {
   createAgentResult
 } = require("./agentResult");
@@ -8,6 +9,7 @@ const { runDemandAgent } = require("./demandAgent");
 const { runMatchingAgent } = require("./matchingAgent");
 const { planMatchedDelivery } = require("./logisticsAgent");
 const { runMonitoringAgent } = require("./monitoringAgent");
+const { createWorkflowDelivery } = require("../services/workflowDeliveryAssignment");
 const {
   createWorkflowExecution,
   startAgentRun,
@@ -33,6 +35,7 @@ async function runFoodRescueWorkflow({
   foodId,
   expectedDemand,
   providerOrganizationId,
+  resumeExecutionId,
   now = new Date()
 }) {
   if (!mongoose.isValidObjectId(foodId)) {
@@ -66,6 +69,8 @@ async function runFoodRescueWorkflow({
   activeFoodWorkflows.add(workflowKey);
   const agentResults = [];
   let execution = null;
+  let restaurant = null;
+  let safety = null;
   let workflowStatus = "IN_PROGRESS";
   let message =
     "The workflow is progressing; delivery completion is not yet confirmed.";
@@ -102,34 +107,74 @@ async function runFoodRescueWorkflow({
   };
 
   try {
-    execution = await createWorkflowExecution({
-      foodId: workflowKey,
-      providerOrganizationId
-    });
+    let predictedSurplus = [];
+    if (resumeExecutionId) {
+      if (!mongoose.isValidObjectId(resumeExecutionId)) {
+        const error = new Error("A valid workflow execution ID is required to resume.");
+        error.code = "INVALID_WORKFLOW_ID";
+        throw error;
+      }
+      execution = await AgentExecution.findOne({
+        _id: resumeExecutionId,
+        food: workflowKey,
+        providerOrganization: providerOrganizationId,
+        workflowStatus: "RUNNING",
+        approvalStatus: "approved"
+      });
+      if (!execution) {
+        const error = new Error("The approved workflow could not be resumed.");
+        error.code = "WORKFLOW_NOT_RESUMABLE";
+        throw error;
+      }
 
-    const restaurant = await executeAgent(
-      "Restaurant Agent",
-      { foodId: workflowKey, expectedDemand: expectedDemand ?? null },
-      () => runRestaurantAgent({ foodId, expectedDemand, now })
-    );
-    if (!restaurant) {
-      return await finishWorkflow("FAILED", message);
+      const restaurantRun = execution.agentRuns.find(
+        (run) => run.agent === "Restaurant Agent" && run.status === "COMPLETED"
+      );
+      if (!restaurantRun?.output?.predictedSurplus?.length) {
+        const error = new Error("The workflow has no saved surplus prediction to resume.");
+        error.code = "WORKFLOW_RESUME_DATA_MISSING";
+        throw error;
+      }
+      restaurant = { output: restaurantRun.output };
+      predictedSurplus = restaurantRun.output.predictedSurplus;
+      agentResults.push(...execution.agentRuns
+        .filter((run) =>
+          run.agent !== "Safety Agent" && run.agent !== "Monitoring Agent"
+        )
+        .map((run) => ({
+          agent: run.agent,
+          status: run.status,
+          input: run.input,
+          output: run.output,
+          startedAt: run.startedAt,
+          completedAt: run.completedAt
+        })));
+    } else {
+      execution = await createWorkflowExecution({
+        foodId: workflowKey,
+        providerOrganizationId
+      });
+
+      restaurant = await executeAgent(
+        "Restaurant Agent",
+        { foodId: workflowKey, expectedDemand: expectedDemand ?? null },
+        () => runRestaurantAgent({ foodId, expectedDemand, now })
+      );
+      if (!restaurant) {
+        return await finishWorkflow("FAILED", message);
+      }
+
+      predictedSurplus = restaurant.output?.predictedSurplus || [];
+      if (predictedSurplus.length === 0) {
+        workflowStatus = "NO_SURPLUS";
+        message = "No eligible surplus was found in the provider listing.";
+        return await finishWorkflow(workflowStatus, message);
+      }
     }
 
-    const predictedSurplus =
-      restaurant.output?.predictedSurplus || [];
-    if (predictedSurplus.length === 0) {
-      workflowStatus = "NO_SURPLUS";
-      message =
-        "No eligible surplus was found in the provider listing.";
-      return await finishWorkflow(workflowStatus, message);
-    }
-
-    const safety = await executeAgent(
+    safety = await executeAgent(
       "Safety Agent",
-      {
-        foodIds: predictedSurplus.map((food) => food.foodId)
-      },
+      { foodIds: predictedSurplus.map((food) => food.foodId) },
       () => runSafetyAgent({ predictedSurplus, now })
     );
     if (!safety) {
@@ -196,6 +241,7 @@ async function runFoodRescueWorkflow({
       async () => {
         const logisticsStartedAt = new Date();
         const logisticsPlans = [];
+        const allocationContexts = [];
 
         for (const allocation of matching.output.allocations) {
           const foodSafety = safety.output.assessments.find(
@@ -226,9 +272,68 @@ async function runFoodRescueWorkflow({
             quantity: allocation.allocatedQuantity,
             unit: allocation.unit,
             pickupAddress: pickup.pickupAddress,
-            deliveryAddress: recipient.address
+            deliveryAddress: recipient.address,
+            pickupCoordinates: pickup.pickupCoordinates,
+            deliveryCoordinates: recipient.coordinates,
+            expiryTime: pickup.expiryTime
           });
-          logisticsPlans.push(plan.output);
+          allocationContexts.push({ allocation, foodSafety, recipient, pickup, plan });
+        }
+
+        const plannedLoadByDriver = new Map();
+        for (const context of allocationContexts) {
+          const quantity = context.allocation.allocatedQuantity;
+          const candidates = context.plan.output.candidateDrivers || [];
+          const previouslyUsedCandidates = [...plannedLoadByDriver.entries()]
+            .map(([driverId, usedMeals]) => ({
+              candidate: candidates.find((item) => item.driverId === driverId),
+              remainingMeals: (candidates.find((item) => item.driverId === driverId)?.capacityMeals || 0) - usedMeals
+            }))
+            .filter((entry) => entry.candidate && entry.remainingMeals >= quantity)
+            .map((entry) => entry.candidate);
+          const selectedDriver = previouslyUsedCandidates[0] || candidates.find((candidate) =>
+            Number(candidate.capacityMeals) - (plannedLoadByDriver.get(candidate.driverId) || 0) >= quantity
+          ) || null;
+          context.selectedDriver = selectedDriver;
+          if (selectedDriver) {
+            plannedLoadByDriver.set(
+              selectedDriver.driverId,
+              (plannedLoadByDriver.get(selectedDriver.driverId) || 0) + quantity
+            );
+          }
+        }
+
+        const claimedDriverIds = new Set();
+        for (const context of allocationContexts) {
+          const { allocation, foodSafety, recipient, pickup, plan, selectedDriver } = context;
+          const alternatives = (plan.output.candidateDrivers || []).filter((candidate) =>
+            candidate.driverId !== selectedDriver?.driverId &&
+            Number(candidate.capacityMeals) >= allocation.allocatedQuantity
+          );
+          const driverCandidates = selectedDriver
+            ? [selectedDriver, ...alternatives]
+            : [];
+          const assignment = await createWorkflowDelivery({
+            workflowId: execution._id,
+            foodId: allocation.foodId,
+            providerOrganizationId,
+            recipientId: allocation.organizationId,
+            quantity: allocation.allocatedQuantity,
+            pickupAddress: pickup.pickupAddress,
+            driverCandidates,
+            preclaimedDriverIds: [...claimedDriverIds]
+          });
+          if (assignment.assignmentStatus === "assigned" && assignment.driverId) {
+            claimedDriverIds.add(assignment.driverId);
+          }
+          logisticsPlans.push({
+            ...plan.output,
+            ...assignment,
+            foodId: allocation.foodId,
+            recipientId: allocation.organizationId,
+            quantity: allocation.allocatedQuantity,
+            foodName: allocation.foodName
+          });
         }
 
         return createAgentResult({
@@ -241,19 +346,23 @@ async function runFoodRescueWorkflow({
           output: {
             plans: logisticsPlans,
             assignmentStatus: logisticsPlans.every(
-              (item) => item.assignmentStatus === "driver_candidate_found"
+              (item) => item.assignmentStatus === "assigned"
             )
-              ? "driver_candidates_found"
+              ? "drivers_assigned"
               : "no_available_driver",
             driverCandidateCount: logisticsPlans.filter(
-              (item) => item.assignmentStatus === "driver_candidate_found"
+              (item) => item.assignmentStatus === "assigned"
             ).length,
             pendingDriverCount: logisticsPlans.filter(
-              (item) => item.assignmentStatus === "no_available_driver"
+              (item) => item.assignmentStatus !== "assigned"
             ).length,
-            deliveryStatus: "pending",
-            reason:
-              "Driver plans are recommendations only; no donation or delivery was created or assigned."
+            donationCount: logisticsPlans.filter((item) => item.donationId).length,
+            deliveryCount: logisticsPlans.filter((item) => item.deliveryId).length,
+            deliveryStatus: logisticsPlans.every(
+              (item) => item.assignmentStatus === "assigned"
+            ) ? "assigned" : "pending",
+            groupedDriverCount: [...new Set(logisticsPlans.map((item) => item.driverId).filter(Boolean))].length,
+            reason: "Matched donations were recorded and driver capacity was shared across compatible stops; pickup and drop-off addresses are available to the multi-stop route planner."
           }
         });
       }
@@ -268,8 +377,8 @@ async function runFoodRescueWorkflow({
         : "IN_PROGRESS";
     message =
       logisticsResult?.output?.assignmentStatus === "no_available_driver"
-        ? "One or more allocations have no available driver; delivery assignment is pending."
-        : "Recipient and driver candidates were identified; delivery assignment is not yet confirmed.";
+        ? "Matched donations were created, but one or more do not yet have an available driver."
+        : "Matched donations and delivery records were created and drivers assigned.";
 
     return await finishWorkflow(workflowStatus, message);
   } catch (error) {

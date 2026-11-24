@@ -137,6 +137,16 @@ const deliverySchema = new mongoose.Schema(
       default: null
     },
 
+    lastEtaNotificationAt: {
+      type: Date,
+      default: null
+    },
+
+    lastEtaNotificationMinutes: {
+      type: Number,
+      default: null
+    },
+
     notes: {
       type: String,
       trim: true,

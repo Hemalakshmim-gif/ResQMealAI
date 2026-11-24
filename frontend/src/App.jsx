@@ -17,6 +17,7 @@ import {
 import './App.css';
 import {
   getInventory,
+  getFoodSafetyAnalysis,
   getDonations,
   getDeliveries,
   getDrivers,
@@ -187,7 +188,7 @@ const [userRole, setUserRole] = useState(() => {
 
     async function loadNotifications() {
       try {
-        if (isDriverContext) return;
+        if (isDriverContext || !localStorage.getItem("nourivya-token")) return;
 
         const response = await getNotifications();
 
@@ -203,9 +204,11 @@ const [userRole, setUserRole] = useState(() => {
     }
 
     loadNotifications();
+    const refreshTimer = window.setInterval(loadNotifications, 5000);
 
     return () => {
       cancelled = true;
+      window.clearInterval(refreshTimer);
     };
   }, [isDriverContext]);
   const [searchQuery, setSearchQuery] = useState('');
@@ -260,9 +263,22 @@ const [userRole, setUserRole] = useState(() => {
     try {
       if (isDriverContext) return;
 
-      const response = await getInventory();
+      const [inventoryResult, safetyResult] = await Promise.allSettled([
+        getInventory(),
+        getFoodSafetyAnalysis(),
+      ]);
+      if (inventoryResult.status === 'rejected') throw inventoryResult.reason;
+      const response = inventoryResult.value;
+      const safetyResponse = safetyResult.status === 'fulfilled'
+        ? safetyResult.value
+        : { data: [] };
+      const safetyByFoodId = new Map(
+        (safetyResponse.data || []).map(result => [String(result.id), result])
+      );
 
-      const inventory = (response.data || []).map(food => ({
+      const inventory = (response.data || []).map(food => {
+        const safety = safetyByFoodId.get(String(food._id));
+        return ({
         id: food._id,
         name: food.foodName,
         category: food.foodType,
@@ -272,12 +288,17 @@ const [userRole, setUserRole] = useState(() => {
           ? food.expiryTime.slice(0, 16).replace('T', ' ')
           : '',
         location: food.pickupAddress,
-        safety: 'REVIEW REQUIRED',
+        safety: safety?.canBeRecommended
+          ? 'SAFE'
+          : safety?.eligibilityStatus === 'ineligible'
+            ? 'INELIGIBLE'
+            : 'REVIEW REQUIRED',
         donationStatus:
           food.status === 'available' ? 'Available' : food.status,
         description: food.description || '',
         provider: food.providerName,
-      }));
+      });
+      });
 
       if (!cancelled) {
         setAppData(previous => ({
@@ -523,7 +544,7 @@ const [userRole, setUserRole] = useState(() => {
               {currentRoute === '/recipient/requirements' && <RecipientRequirements appData={appData} setAppData={setAppData} addToast={addToast} />}
               {currentRoute === '/matching' && <MatchingPage appData={appData} setAppData={setAppData} addToast={addToast} />}
               {currentRoute === '/donations' && <DonationsPage appData={appData} setAppData={setAppData} addToast={addToast} navigate={navigate} />}
-              {currentRoute.startsWith('/donations/') && <DonationDetailView appData={appData} currentRoute={currentRoute} navigate={navigate} />}
+              {currentRoute.startsWith('/donations/') && <DonationDetailView appData={appData} setAppData={setAppData} currentUser={currentUser} currentRoute={currentRoute} navigate={navigate} addToast={addToast} />}
               {currentRoute === '/logistics' && (
   <LogisticsPage
     appData={appData}

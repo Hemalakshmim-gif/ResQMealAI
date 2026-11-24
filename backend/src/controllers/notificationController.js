@@ -7,6 +7,20 @@ const Driver = require("../models/Driver");
 const FoodSafetyReview = require("../models/FoodSafetyReview");
 
 const HOURS = 60 * 60 * 1000;
+const OPERATIONAL_NOTIFICATION_SYNC_INTERVAL_MS = 15000;
+let lastOperationalSyncStartedAt = 0;
+let operationalSyncPromise = null;
+
+function notificationVisibility(req) {
+  const globalAlerts = { recipientOrganization: null };
+  if (req.organization?.role !== "recipient") return globalAlerts;
+  return {
+    $or: [
+      globalAlerts,
+      { recipientOrganization: req.organization.id }
+    ]
+  };
+}
 
 // Build notification candidates from actual MongoDB records.
 async function buildOperationalNotifications() {
@@ -216,12 +230,32 @@ async function synchronizeOperationalNotifications() {
   return candidates.length;
 }
 
+function scheduleOperationalNotificationSync() {
+  const now = Date.now();
+  if (
+    operationalSyncPromise ||
+    now - lastOperationalSyncStartedAt < OPERATIONAL_NOTIFICATION_SYNC_INTERVAL_MS
+  ) return;
+
+  lastOperationalSyncStartedAt = now;
+  operationalSyncPromise = synchronizeOperationalNotifications()
+    .catch((error) => {
+      console.error("Operational notification sync failed:", error.message);
+    })
+    .finally(() => {
+      operationalSyncPromise = null;
+    });
+}
+
 // GET /api/notifications
 const getNotifications = async (req, res) => {
   try {
-    await synchronizeOperationalNotifications();
+    // Refresh generated alerts in the background so this read endpoint can
+    // return existing and delivery-progress notifications immediately.
+    scheduleOperationalNotificationSync();
 
-    const notifications = await Notification.find()
+    const notifications = await Notification.find(notificationVisibility(req))
+      .select("title desc category severity sourceType sourceId recipientOrganization read createdAt occurredAt eventKey")
       .sort({ createdAt: -1 })
       .limit(200)
       .lean();
@@ -246,7 +280,7 @@ const getNotifications = async (req, res) => {
 const markAllNotificationsRead = async (req, res) => {
   try {
     await Notification.updateMany(
-      { read: false },
+      { ...notificationVisibility(req), read: false },
       { $set: { read: true } }
     );
 

@@ -1,6 +1,9 @@
 
 const { GoogleGenAI } = require("@google/genai");
 
+const AI_REQUEST_TIMEOUT_MS = 8000;
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
+
 const client = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
 });
@@ -68,51 +71,16 @@ ${JSON.stringify(eligibleInventory)}
 `;
 
   
-let response;
-let lastError;
-
-for (let attempt = 1; attempt <= 3; attempt++) {
-  try {
-    console.log(`Sending request to Gemini (attempt ${attempt}/3)...`);
-    response = await client.models.generateContent({
-      model: "gemini-3.8-flash",
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-      },
-    });
-    console.log("Gemini response received.");
-
-    break;
-  } catch (error) {
-    lastError = error;
-
-    const message =
-      typeof error.message === "string" ? error.message : "";
-
-    const isTemporary =
-      message.includes("503") ||
-      message.includes("UNAVAILABLE") ||
-      message.includes("429") ||
-      message.includes("RESOURCE_EXHAUSTED");
-
-    if (!isTemporary || attempt === 3) {
-      throw error;
-    }
-
-    console.log(
-      `Gemini temporarily unavailable. Retry ${attempt + 1}/3...`
-    );
-
-    await new Promise((resolve) =>
-      setTimeout(resolve, attempt * 2000)
-    );
-  }
-}
-
-if (!response) {
-  throw lastError || new Error("Gemini request failed");
-}
+console.log("Sending inventory reasoning request to Gemini (8-second limit)...");
+const response = await client.models.generateContent({
+  model: GEMINI_MODEL,
+  contents: prompt,
+  config: {
+    responseMimeType: "application/json",
+    abortSignal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
+  },
+});
+console.log("Gemini response received.");
 
   const output = response.text;
 

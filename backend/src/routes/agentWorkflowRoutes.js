@@ -4,7 +4,8 @@ const {
   getAgentWorkflowHistory,
   getAgentWorkflow,
   getAgentWorkflowStatus,
-  reviewAgentWorkflowSafety
+  reviewAgentWorkflowSafety,
+  resumeApprovedAgentWorkflow
 } = require("../controllers/agentWorkflowController");
 const { authenticateOrganization } = require("../middleware/authMiddleware");
 
@@ -30,6 +31,10 @@ router.get("/workflows/:executionId", getAgentWorkflow);
 router.post(
   "/workflows/:executionId/safety-review",
   reviewAgentWorkflowSafety
+);
+router.post(
+  "/workflows/:executionId/resume",
+  resumeApprovedAgentWorkflow
 );
 
 module.exports = router;

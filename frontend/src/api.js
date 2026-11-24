@@ -4,6 +4,7 @@ const API_BASE_URL =
 
 
 async function apiRequest(path, options = {}) {
+  const { timeoutMs, ...requestOptions } = options;
   const token = localStorage.getItem("nourivya-token");
   const driverToken = localStorage.getItem("nourivya-driver-token");
   const isTrackingRequest = path.startsWith("/api/tracking/");
@@ -15,6 +16,10 @@ async function apiRequest(path, options = {}) {
   const isOrganizationProfileUpdate =
     path.startsWith("/api/organizations/") &&
     options.method === "PATCH";
+  const isRecipientRequirementsRequest =
+    path.startsWith("/api/organizations/me/requirements");
+  const isDonationDispatchRequest =
+    path.startsWith("/api/donations/") && path.endsWith("/dispatch");
 
   const headers = {
     "Content-Type": "application/json",
@@ -32,9 +37,12 @@ async function apiRequest(path, options = {}) {
   if (
     !isTrackingRequest &&
     (path.startsWith("/api/settings") ||
+      isRecipientRequirementsRequest ||
+      path.startsWith("/api/notifications") ||
       path.startsWith("/api/inventory") ||
       path.startsWith("/api/food-safety/reviews") ||
       isAgentWorkflowRequest ||
+      isDonationDispatchRequest ||
       isOrganizationProfileUpdate) &&
     token
   ) {
@@ -50,14 +58,14 @@ async function apiRequest(path, options = {}) {
     ? new AbortController()
     : null;
   const trackingRequestTimeout = trackingAbortController
-    ? window.setTimeout(() => trackingAbortController.abort(), 10000)
+    ? window.setTimeout(() => trackingAbortController.abort(), timeoutMs || 10000)
     : null;
   let response;
   let result;
 
   try {
     response = await fetch(`${API_BASE_URL}${path}`, {
-      ...options,
+      ...requestOptions,
       headers,
       ...(trackingAbortController
         ? { signal: trackingAbortController.signal }
@@ -118,6 +126,12 @@ export const getDeliveryRoute = (deliveryId) =>
   apiRequest(
     `/api/tracking/deliveries/${encodeURIComponent(deliveryId)}/route`
   );
+export const optimizeMyDeliveryRoute = (deliveryIds) =>
+  apiRequest("/api/tracking/routes/optimize", {
+    method: "POST",
+    timeoutMs: 30000,
+    body: JSON.stringify({ deliveryIds })
+  });
 export const startDeliveryTracking = (deliveryId) =>
   apiRequest(
     `/api/tracking/deliveries/${encodeURIComponent(deliveryId)}/start`,
@@ -198,6 +212,12 @@ export const submitAgentWorkflowSafetyReview = (executionId, review) =>
     }
   );
 
+export const resumeApprovedAgentWorkflow = (executionId) =>
+  apiRequest(
+    `/api/agents/workflows/${encodeURIComponent(executionId)}/resume`,
+    { method: "POST", body: JSON.stringify({}) }
+  );
+
 export const createFood = (food) =>
   apiRequest("/api/inventory", {
     method: "POST",
@@ -233,6 +253,9 @@ export const updateDonation = (id, updates) =>
     method: "PATCH",
     body: JSON.stringify(updates),
   });
+
+export const dispatchPreparedDonation = (id) =>
+  apiRequest(`/api/donations/${id}/dispatch`, { method: "POST" });
 
   
 export const getSettings = () =>
@@ -284,6 +307,15 @@ export const updateOrganization = (id, updates) =>
   apiRequest(`/api/organizations/${id}`, {
     method: "PATCH",
     body: JSON.stringify(updates),
+  });
+
+export const getMyRecipientRequirements = () =>
+  apiRequest("/api/organizations/me/requirements");
+
+export const updateMyRecipientRequirements = (requirements) =>
+  apiRequest("/api/organizations/me/requirements", {
+    method: "PATCH",
+    body: JSON.stringify(requirements),
   });
 
 

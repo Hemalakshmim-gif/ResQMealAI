@@ -61,6 +61,7 @@ async function runRestaurantAgent({
           unit: food.unit,
           foodType: food.foodType,
           pickupAddress: food.pickupAddress,
+          pickupCoordinates: food.pickupCoordinates || null,
           expiryTime: food.expiryTime,
           predictionStatus:
             expectedDemand === undefined

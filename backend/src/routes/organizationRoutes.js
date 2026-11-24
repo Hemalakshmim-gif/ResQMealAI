@@ -6,16 +6,21 @@ const {
   getAllOrganizations,
   getOrganizationById,
   updateOrganization,
-  deleteOrganization
+  deleteOrganization,
+  getMyRecipientRequirements,
+  updateMyRecipientRequirements
 } = require("../controllers/organizationController");
 const {
-  authenticateOrganizationIfProvided
+  authenticateOrganizationIfProvided,
+  authenticateOrganization
 } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
 router.post("/", createOrganization);
 router.get("/", getAllOrganizations);
+router.get("/me/requirements", authenticateOrganization, getMyRecipientRequirements);
+router.patch("/me/requirements", authenticateOrganization, updateMyRecipientRequirements);
 router.get("/:id", getOrganizationById);
 router.patch(
   "/:id",

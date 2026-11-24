@@ -41,6 +41,13 @@ const donationSchema = new mongoose.Schema(
       default: ""
     },
 
+    workflowAssignmentKey: {
+      type: String,
+      trim: true,
+      default: undefined,
+      select: false
+    },
+
     requestedAt: {
       type: Date,
       default: Date.now
@@ -54,6 +61,11 @@ const donationSchema = new mongoose.Schema(
   {
     timestamps: true
   }
+);
+
+donationSchema.index(
+  { workflowAssignmentKey: 1 },
+  { unique: true, sparse: true, name: "unique_workflow_donation_assignment" }
 );
 
 module.exports = mongoose.model("Donation", donationSchema);

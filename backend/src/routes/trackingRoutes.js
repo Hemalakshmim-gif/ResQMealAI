@@ -3,7 +3,8 @@ const {
   startDeliveryTracking,
   getTrackingRoute,
   getTrackingSnapshot,
-  updateTrackingLocation
+  updateTrackingLocation,
+  optimizeTrackingRoute
 } = require("../controllers/trackingController");
 const {
   authenticateTrackingUser
@@ -19,5 +20,6 @@ router.post(
 );
 router.get("/deliveries/:deliveryId", getTrackingSnapshot);
 router.get("/deliveries/:deliveryId/route", getTrackingRoute);
+router.post("/routes/optimize", optimizeTrackingRoute);
 
 module.exports = router;

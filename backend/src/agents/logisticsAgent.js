@@ -12,6 +12,9 @@ const { createAgentResult } = require("./agentResult");
 const {
   analyzeFoodSafety,
 } = require("./foodSafetyEligibilityAgent");
+const { isValidCoordinates, getDrivingRoute } = require("../services/routingService");
+
+const DRIVER_LOCATION_MAX_AGE_MS = 60 * 60 * 1000;
 
 const normalize = (value) =>
   String(value || "").trim().toLowerCase();
@@ -23,7 +26,10 @@ const planMatchedDelivery = async ({
   quantity,
   unit,
   pickupAddress,
-  deliveryAddress
+  deliveryAddress,
+  pickupCoordinates,
+  deliveryCoordinates,
+  expiryTime
 }) => {
   const startedAt = new Date();
 
@@ -52,7 +58,7 @@ const planMatchedDelivery = async ({
   }
 
   const drivers = await Driver.find({ status: "available" }).lean();
-  const candidates = drivers
+  let candidates = drivers
     .filter(
       (driver) =>
         Number.isFinite(Number(driver.capacityMeals)) &&
@@ -70,6 +76,80 @@ const planMatchedDelivery = async ({
         first.capacityRemainder - second.capacityRemainder ||
         first.driverId.localeCompare(second.driverId)
     );
+
+  const validExpiry = expiryTime && Number.isFinite(new Date(expiryTime).getTime())
+    ? new Date(expiryTime)
+    : null;
+  if (
+    candidates.length > 0 &&
+    process.env.ROUTING_API_BASE_URL &&
+    isValidCoordinates(pickupCoordinates) &&
+    isValidCoordinates(deliveryCoordinates)
+  ) {
+    const recentCutoff = new Date(Date.now() - DRIVER_LOCATION_MAX_AGE_MS);
+    const recentDeliveries = await Delivery.find({
+      driver: { $in: drivers.map((driver) => driver._id) },
+      "latestLocation.updatedAt": { $gte: recentCutoff }
+    })
+      .select("driver latestLocation")
+      .sort({ "latestLocation.updatedAt": -1 })
+      .lean();
+    const lastLocationByDriver = new Map();
+    for (const item of recentDeliveries) {
+      const key = String(item.driver);
+      if (!lastLocationByDriver.has(key) && isValidCoordinates(item.latestLocation)) {
+        lastLocationByDriver.set(key, item.latestLocation);
+      }
+    }
+    const deliveryLeg = await getDrivingRoute({
+      origin: pickupCoordinates,
+      destination: deliveryCoordinates
+    }).catch(() => null);
+    const now = Date.now();
+    candidates = await Promise.all(candidates.map(async (candidate) => {
+      const origin = lastLocationByDriver.get(candidate.driverId);
+      if (!origin) return { ...candidate, routeStatus: "driver_location_unavailable" };
+      const pickupLeg = await getDrivingRoute({
+        origin,
+        destination: pickupCoordinates
+      }).catch(() => null);
+      if (!pickupLeg) return { ...candidate, routeStatus: "route_unavailable" };
+      const estimatedTotalSeconds = pickupLeg.durationSeconds +
+        (deliveryLeg?.durationSeconds || 0);
+      const estimatedArrivalAt = new Date(now + estimatedTotalSeconds * 1000);
+      const expiryFeasible = validExpiry && deliveryLeg
+        ? estimatedArrivalAt.getTime() < validExpiry.getTime()
+        : null;
+      return {
+        ...candidate,
+        routeStatus: deliveryLeg ? "calculated" : "pickup_route_only",
+        routeToPickupMeters: pickupLeg.distanceMeters,
+        routeToPickupSeconds: pickupLeg.durationSeconds,
+        estimatedTotalSeconds,
+        estimatedArrivalAt,
+        expiryFeasible
+      };
+    }));
+    candidates = candidates.filter((candidate) => candidate.expiryFeasible !== false);
+  }
+
+  candidates.sort((first, second) => {
+    if (first.expiryFeasible !== second.expiryFeasible) {
+      if (first.expiryFeasible === true) return -1;
+      if (second.expiryFeasible === true) return 1;
+    }
+    const firstHasRoute = Number.isFinite(first.routeToPickupSeconds);
+    const secondHasRoute = Number.isFinite(second.routeToPickupSeconds);
+    if (firstHasRoute !== secondHasRoute) return firstHasRoute ? -1 : 1;
+    if (
+      firstHasRoute && secondHasRoute &&
+      first.routeToPickupSeconds !== second.routeToPickupSeconds
+    ) {
+      return first.routeToPickupSeconds - second.routeToPickupSeconds;
+    }
+    return first.capacityRemainder - second.capacityRemainder ||
+      first.driverId.localeCompare(second.driverId);
+  });
 
   return createAgentResult({
     agent: "Logistics Agent",
@@ -92,7 +172,9 @@ const planMatchedDelivery = async ({
       deliveryStatus: "pending",
       reason:
         candidates.length > 0
-          ? "Driver is recommended by available status and sufficient meal capacity; no assignment or delivery completion is claimed."
+          ? candidates[0].routeStatus === "calculated"
+            ? "Driver is ranked using availability, capacity, a recent GPS position, road-route duration, and food expiry feasibility."
+            : "Driver is ranked using availability and capacity; current GPS or road-route data was unavailable."
           : "No available driver has sufficient meal capacity."
     }
   });
@@ -118,6 +200,25 @@ const planDeliveries = async () => {
     analyzeFoodSafety(),
   ]);
 
+  const driverIds = drivers.map((driver) => driver._id);
+  const locationCutoff = new Date(Date.now() - DRIVER_LOCATION_MAX_AGE_MS);
+  const recentDriverDeliveries = driverIds.length > 0
+    ? await Delivery.find({
+        driver: { $in: driverIds },
+        "latestLocation.updatedAt": { $gte: locationCutoff }
+      })
+        .select("driver latestLocation")
+        .sort({ "latestLocation.updatedAt": -1 })
+        .lean()
+    : [];
+  const latestLocationByDriver = new Map();
+  for (const item of recentDriverDeliveries) {
+    const driverId = String(item.driver);
+    if (!latestLocationByDriver.has(driverId) && isValidCoordinates(item.latestLocation)) {
+      latestLocationByDriver.set(driverId, item.latestLocation);
+    }
+  }
+
   // Map the safety result to each food record.
   const safetyByFoodId = new Map(
     (safetyAnalysis.results || []).map((result) => [
@@ -126,7 +227,7 @@ const planDeliveries = async () => {
     ])
   );
 
-  const plans = deliveries.map((delivery) => {
+  const plans = await Promise.all(deliveries.map(async (delivery) => {
     const donation = delivery.donation;
     const food = donation?.food;
 
@@ -181,7 +282,7 @@ const planDeliveries = async () => {
     const canPlan =
       planningStatus === "candidate_drivers_found";
 
-    const candidates = canPlan
+    let candidates = canPlan
       ? drivers
           .filter(
             (driver) =>
@@ -200,13 +301,27 @@ const planDeliveries = async () => {
                 location.includes(pickup)
               );
 
+            const lastKnownLocation = latestLocationByDriver.get(String(driver._id));
             return {
               driverId: String(driver._id),
               driverName: driver.name,
               vehicleType: driver.vehicleType,
               capacityMeals: driver.capacityMeals,
               currentLocation: driver.currentLocation,
+              lastKnownLocation: lastKnownLocation
+                ? {
+                    latitude: lastKnownLocation.latitude,
+                    longitude: lastKnownLocation.longitude,
+                    updatedAt: lastKnownLocation.updatedAt
+                  }
+                : null,
+              remainingCapacity: Number(driver.capacityMeals) - quantity,
               locationMatch,
+              routeStatus: "not_calculated",
+              routeToPickupMeters: null,
+              routeToPickupSeconds: null,
+              estimatedTotalSeconds: null,
+              expiryFeasible: null,
               reason: locationMatch
                 ? "Meal capacity is sufficient and the location strings match."
                 : "Meal capacity is sufficient; pickup proximity still needs verification.",
@@ -217,6 +332,64 @@ const planDeliveries = async () => {
               Number(b.locationMatch) - Number(a.locationMatch)
           )
       : [];
+
+    if (
+      canPlan &&
+      process.env.ROUTING_API_BASE_URL &&
+      isValidCoordinates(delivery.pickupCoordinates) &&
+      isValidCoordinates(delivery.deliveryCoordinates)
+    ) {
+      const deliveryLeg = await getDrivingRoute({
+        origin: delivery.pickupCoordinates,
+        destination: delivery.deliveryCoordinates
+      }).catch(() => null);
+
+      candidates = await Promise.all(candidates.map(async (candidate) => {
+        if (!candidate.lastKnownLocation) return candidate;
+        const driverLeg = await getDrivingRoute({
+          origin: candidate.lastKnownLocation,
+          destination: delivery.pickupCoordinates
+        }).catch(() => null);
+        if (!driverLeg) {
+          return { ...candidate, routeStatus: "unavailable" };
+        }
+        const estimatedTotalSeconds = driverLeg.durationSeconds +
+          (deliveryLeg?.durationSeconds || 0);
+        const expiryFeasible = hoursUntilExpiry !== null && deliveryLeg
+          ? estimatedTotalSeconds < hoursUntilExpiry * 3600
+          : null;
+        return {
+          ...candidate,
+          routeStatus: deliveryLeg ? "calculated" : "pickup_only",
+          routeToPickupMeters: driverLeg.distanceMeters,
+          routeToPickupSeconds: driverLeg.durationSeconds,
+          estimatedTotalSeconds,
+          expiryFeasible,
+          reason: expiryFeasible === false
+            ? "The available route estimate exceeds the food's remaining shelf life."
+            : "Ranked using the driver's recent GPS location, route duration, meal capacity, and expiry time."
+        };
+      }));
+      candidates = candidates.filter((candidate) => candidate.expiryFeasible !== false);
+    }
+
+    candidates.sort((first, second) => {
+      if (first.expiryFeasible !== second.expiryFeasible) {
+        if (first.expiryFeasible === true) return -1;
+        if (second.expiryFeasible === true) return 1;
+      }
+      if (
+        Number.isFinite(first.routeToPickupSeconds) &&
+        Number.isFinite(second.routeToPickupSeconds) &&
+        first.routeToPickupSeconds !== second.routeToPickupSeconds
+      ) {
+        return first.routeToPickupSeconds - second.routeToPickupSeconds;
+      }
+      if (first.locationMatch !== second.locationMatch) {
+        return Number(second.locationMatch) - Number(first.locationMatch);
+      }
+      return first.remainingCapacity - second.remainingCapacity;
+    });
 
     if (canPlan && candidates.length === 0) {
       planningStatus = "no_suitable_driver";
@@ -245,7 +418,7 @@ const planDeliveries = async () => {
 
       candidateDrivers: candidates,
     };
-  });
+  }));
 
   let aiStatus = "not_needed";
   let aiRecommendationsCount = 0;
@@ -274,9 +447,22 @@ const planDeliveries = async () => {
         }
       }
 
-      // Location matching remains the primary ranking rule.
-      // AI ranking is only a tie-breaker.
+      // Expiry feasibility and calculated route time remain primary;
+      // AI ranking only breaks ties after deterministic eligibility.
       plan.candidateDrivers.sort((a, b) => {
+        if (a.expiryFeasible !== b.expiryFeasible) {
+          if (a.expiryFeasible === true) return -1;
+          if (b.expiryFeasible === true) return 1;
+        }
+        const aHasRoute = Number.isFinite(a.routeToPickupSeconds);
+        const bHasRoute = Number.isFinite(b.routeToPickupSeconds);
+        if (aHasRoute !== bHasRoute) return aHasRoute ? -1 : 1;
+        if (
+          aHasRoute && bHasRoute &&
+          a.routeToPickupSeconds !== b.routeToPickupSeconds
+        ) {
+          return a.routeToPickupSeconds - b.routeToPickupSeconds;
+        }
         if (a.locationMatch !== b.locationMatch) {
           return Number(b.locationMatch) - Number(a.locationMatch);
         }

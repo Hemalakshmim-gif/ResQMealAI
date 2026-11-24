@@ -82,8 +82,33 @@ function FitMapToLocations({
   return null;
 }
 
-export default function LiveTrackingMap({ tracking, route }) {
+export default function LiveTrackingMap({ tracking, route, routePlan }) {
   const points = useMemo(() => {
+    if (routePlan) {
+      const routeStops = [
+        {
+          key: "route-start",
+          type: "driver",
+          label: "Route start",
+          detail: "Driver's latest GPS position",
+          coordinates: routePlan.startLocation
+        },
+        ...(routePlan.stops || []).map((stop, index) => ({
+          key: `${stop.deliveryId}:${stop.kind}:${index}`,
+          type: stop.kind === "pickup" ? "pickup" : "destination",
+          label: stop.kind === "pickup" ? "Pickup stop" : "Delivery stop",
+          detail: `${stop.foodName || "Food"} · ${stop.kind}`,
+          coordinates: stop.coordinates
+        }))
+      ];
+      return routeStops
+        .filter((point) => isValidCoordinates(point.coordinates))
+        .map((point) => ({
+          ...point,
+          position: [point.coordinates.latitude, point.coordinates.longitude]
+        }));
+    }
+
     const candidates = [
       {
         key: "driver",
@@ -123,15 +148,27 @@ export default function LiveTrackingMap({ tracking, route }) {
           point.coordinates.longitude
         ]
       }));
-  }, [tracking]);
+  }, [tracking, routePlan]);
 
-  const routeKey = [
+  const routeKey = routePlan
+    ? [
+        routePlan.startLocation?.latitude,
+        routePlan.startLocation?.longitude,
+        ...(routePlan.stops || []).flatMap((stop) => [
+          stop.coordinates?.latitude,
+          stop.coordinates?.longitude,
+          stop.kind
+        ])
+      ].join(":")
+    : [
     tracking?.pickup?.coordinates?.latitude,
     tracking?.pickup?.coordinates?.longitude,
     tracking?.destination?.coordinates?.latitude,
     tracking?.destination?.coordinates?.longitude
-  ].join(":");
-  const driverAvailable = isValidCoordinates(tracking?.latestLocation);
+    ].join(":");
+  const driverAvailable = routePlan
+    ? isValidCoordinates(routePlan.startLocation)
+    : isValidCoordinates(tracking?.latestLocation);
 
   if (!points.length) {
     return (

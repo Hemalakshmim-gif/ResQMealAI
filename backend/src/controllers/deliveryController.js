@@ -5,6 +5,7 @@ const Delivery = require("../models/Delivery");
 const Donation = require("../models/Donation");
 const Driver = require("../models/Driver");
 const FoodInventory = require("../models/FoodInventory");
+const { notifyRecipientOfProgress } = require("../services/deliveryProgressNotificationService");
 
 // CREATE: Create a delivery for an existing donation
 const createDelivery = async (req, res) => {
@@ -154,6 +155,13 @@ const createDelivery = async (req, res) => {
     const result = await Delivery.findById(delivery._id)
       .populate("donation")
       .populate("driver");
+
+    await notifyRecipientOfProgress({
+      deliveryId: delivery._id,
+      event: driverId ? "assigned" : "awaiting_driver"
+    }).catch((error) => {
+      console.error("Could not create recipient delivery notification:", error.message);
+    });
 
     return res.status(201).json({
       success: true,
@@ -471,21 +479,32 @@ const updateDelivery = async (req, res) => {
       ["delivered", "cancelled", "failed"].includes(updates.status) &&
       currentDelivery.driver
     ) {
-      await Driver.findOneAndUpdate(
-        {
-          _id: currentDelivery.driver,
-          status: "assigned"
-        },
-        {
-          $set: { status: "available" }
-        }
-      );
+      const otherActiveDeliveries = await Delivery.exists({
+        _id: { $ne: delivery._id },
+        driver: currentDelivery.driver,
+        status: { $in: ["assigned", "picked_up", "in_transit"] }
+      });
+      if (!otherActiveDeliveries) {
+        await Driver.findOneAndUpdate(
+          { _id: currentDelivery.driver, status: "assigned" },
+          { $set: { status: "available" } }
+        );
+      }
     }
 
     // Fetch fresh populated data so the response shows current driver status.
     const result = await Delivery.findById(delivery._id)
       .populate("donation")
       .populate("driver");
+
+    if (updates.status) {
+      await notifyRecipientOfProgress({
+        deliveryId: delivery._id,
+        event: updates.status
+      }).catch((error) => {
+        console.error("Could not create recipient progress notification:", error.message);
+      });
+    }
 
     return res.status(200).json({
       success: true,
@@ -732,6 +751,13 @@ const assignDelivery = async (req, res) => {
     const result = await Delivery.findById(updatedDelivery._id)
       .populate("donation")
       .populate("driver");
+
+    await notifyRecipientOfProgress({
+      deliveryId: updatedDelivery._id,
+      event: "assigned"
+    }).catch((error) => {
+      console.error("Could not create recipient assignment notification:", error.message);
+    });
 
     return res.status(200).json({
       success: true,

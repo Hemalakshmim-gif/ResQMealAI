@@ -29,6 +29,7 @@ export function Sidebar({ currentRoute, navigate, collapsed, setCollapsed, userR
         { label: 'Inventory', path: '/provider/inventory', icon: Database, roles: ['admin', 'provider'] },
         { label: 'Surplus Predictions', path: '/provider/predictions', icon: TrendingUp, roles: ['admin', 'provider'] },
         { label: 'Food Safety', path: '/provider/safety', icon: ShieldCheck, roles: ['admin', 'provider'] },
+        { label: 'Recipient Requirements', path: '/recipient/requirements', icon: Users, roles: ['recipient'] },
         { label: 'Recipient Matching', path: '/matching', icon: Cpu, roles: ['admin', 'provider', 'recipient'] },
         { label: 'Donations', path: '/donations', icon: Layers, roles: ['admin', 'provider', 'recipient'] }
       ]

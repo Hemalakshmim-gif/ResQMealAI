@@ -1,5 +1,9 @@
 const mongoose = require("mongoose");
 const Delivery = require("../models/Delivery");
+const {
+  maybeNotifyRecipientEta,
+  notifyRecipientOfProgress
+} = require("./deliveryProgressNotificationService");
 
 const TRACKABLE_STATUSES = ["assigned", "picked_up", "in_transit"];
 const TERMINAL_STATUSES = ["delivered", "failed", "cancelled"];
@@ -185,6 +189,12 @@ async function startTracking({ deliveryId, driverId, now = new Date() }) {
   );
 
   if (updatedDelivery) {
+    void notifyRecipientOfProgress({
+      deliveryId: updatedDelivery._id,
+      event: "tracking_started"
+    }).catch((error) => {
+      console.error("Could not create recipient tracking notification:", error.message);
+    });
     return updatedDelivery;
   }
 
@@ -229,6 +239,9 @@ async function updateDriverLocation({
   );
 
   if (delivery) {
+    void maybeNotifyRecipientEta(delivery._id).catch((error) => {
+      console.error("Could not calculate recipient ETA notification:", error.message);
+    });
     return delivery;
   }
 

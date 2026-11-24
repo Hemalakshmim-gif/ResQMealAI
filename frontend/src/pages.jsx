@@ -8,9 +8,12 @@ import {
 
 import {
   createOrganization,
+  getMyRecipientRequirements,
+  updateMyRecipientRequirements,
   createDonation,
   createFood,
   getOrganizations,
+  getDonations,
   getTrackingSnapshot,
   getDeliveryRoute,
   loginOrganization,
@@ -20,6 +23,7 @@ import {
   submitFoodSafetyReview,
   getInventory,
   updateDonation,
+  dispatchPreparedDonation,
   getSettings,
   updateSettings,
   getNotifications,
@@ -29,6 +33,7 @@ import {
   getAgentWorkflowHistory,
   getAgentWorkflow,
   startAgentWorkflow,
+  resumeApprovedAgentWorkflow,
   submitAgentWorkflowSafetyReview,
   getReplanningProposals,
   approveReplanningProposal
@@ -1354,6 +1359,7 @@ export function InventoryPage({ appData, setAppData, addToast }) {
     category: 'Prepared Meals',
     quantity: '10',
     unit: 'meals',
+    weightKg: '',
     expiryTime: '',
     providerName: '',
     pickupAddress: '',
@@ -1372,6 +1378,7 @@ export function InventoryPage({ appData, setAppData, addToast }) {
       category: 'Prepared Meals',
       quantity: '10',
       unit: 'meals',
+      weightKg: '',
       expiryTime: '',
       providerName: '',
       pickupAddress: '',
@@ -1409,6 +1416,17 @@ export function InventoryPage({ appData, setAppData, addToast }) {
       return;
     }
 
+    const measuredWeightKg = newItem.weightKg.trim()
+      ? Number(newItem.weightKg)
+      : null;
+    if (
+      measuredWeightKg !== null &&
+      (!Number.isFinite(measuredWeightKg) || measuredWeightKg <= 0)
+    ) {
+      addToast('Measured food weight must be greater than zero.', 'error');
+      return;
+    }
+
     if (
       !newItem.expiryTime ||
       Number.isNaN(expiryDate.getTime()) ||
@@ -1432,6 +1450,7 @@ export function InventoryPage({ appData, setAppData, addToast }) {
       foodName,
       quantity,
       unit: newItem.unit,
+      ...(measuredWeightKg !== null ? { weightKg: measuredWeightKg } : {}),
       providerName,
       pickupAddress,
       expiryTime: expiryDate.toISOString(),
@@ -1850,6 +1869,27 @@ export function InventoryPage({ appData, setAppData, addToast }) {
                 </div>
               </div>
 
+              {!['kg', 'grams'].includes(newItem.unit) && (
+                <div>
+                  <label style={labelStyle}>Measured total food weight (kg)</label>
+                  <input
+                    type="number"
+                    min="0.001"
+                    step="0.001"
+                    value={newItem.weightKg}
+                    onChange={(event) =>
+                      updateField('weightKg', event.target.value)
+                    }
+                    placeholder="Enter the actual batch weight for CO₂e reporting"
+                    style={inputStyle}
+                    disabled={saving}
+                  />
+                  <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px' }}>
+                    Optional. Enter a measured weight; meal or packet counts alone cannot determine food mass.
+                  </p>
+                </div>
+              )}
+
               <div
                 style={{
                   display: 'grid',
@@ -2243,7 +2283,7 @@ export function PredictionsPage({ addToast }) {
               Inventory Analysis Details
             </h3>
 
-            {analysis.aiStatus !== 'available' && (
+            {analysis.aiStatus !== 'success' && (
               <p
                 style={{
                   padding: '12px',
@@ -2815,17 +2855,12 @@ export function RecipientDashboard({ appData, addToast, navigate }) {
 
     async function loadOrganization() {
       try {
-        const response = await getOrganizations();
-        const organizations = response.data || [];
-        const activeOrganization = organizations.find(
-          (organization) => organization.isActive
-        );
-
-        if (!cancelled && activeOrganization) {
-          setOrganizationId(activeOrganization._id);
-        } else if (!cancelled) {
-          addToast('No active recipient organization was found.', 'error');
+        const response = await getMyRecipientRequirements();
+        const organization = response.data;
+        if (!response.success || !organization?._id || organization.isActive === false) {
+          throw new Error(response.message || 'No active recipient account was found.');
         }
+        if (!cancelled) setOrganizationId(organization._id);
       } catch (error) {
         if (!cancelled) {
           addToast(error.message || 'Could not load recipient organization.', 'error');
@@ -2923,7 +2958,7 @@ const availableItems = appData.inventory.filter((item) => {
   return (
     item.donationStatus === 'Available' &&
     safety?.canBeRecommended === true &&
-    safety?.eligibilityStatus === 'eligible'
+    safety?.eligibilityStatus === 'approved'
   );
 });
 
@@ -3054,33 +3089,119 @@ const availableItems = appData.inventory.filter((item) => {
 }
 
 export function RecipientRequirements({ addToast }) {
-  const [reqs, setReqs] = useState({ capacity: 150, maxDistance: 10, categories: 'Bakery, Prepared Meals' });
+  const [reqs, setReqs] = useState({
+    capacityMeals: '',
+    requestedMeals: '',
+    foodTypes: []
+  });
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const foodTypeOptions = [
+    ['cooked', 'Prepared meals'],
+    ['raw', 'Raw food'],
+    ['packaged', 'Packaged food'],
+    ['bakery', 'Bakery'],
+    ['dairy', 'Dairy'],
+    ['produce', 'Produce'],
+    ['other', 'Other']
+  ];
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadRequirements() {
+      try {
+        const response = await getMyRecipientRequirements();
+        const organization = response.data;
+        if (!response.success || !organization) {
+          throw new Error(response.message || 'Could not load recipient requirements.');
+        }
+        if (!cancelled) {
+          const requestedTypes = organization.requestedFoodTypes || [];
+          const acceptedTypes = organization.acceptedFoodTypes || [];
+          setReqs({
+            capacityMeals: organization.capacityMeals ?? '',
+            requestedMeals: organization.requestedMeals ?? '',
+            foodTypes: requestedTypes.filter((type) => acceptedTypes.includes(type))
+          });
+          setError('');
+        }
+      } catch (loadError) {
+        if (!cancelled) setError(loadError.message || 'Could not load recipient requirements.');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    loadRequirements();
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    const capacityMeals = Number(reqs.capacityMeals);
+    const requestedMeals = Number(reqs.requestedMeals);
+    if (!Number.isInteger(capacityMeals) || capacityMeals < 1) {
+      addToast('Enter a daily capacity of at least one meal.', 'error');
+      return;
+    }
+    if (!Number.isInteger(requestedMeals) || requestedMeals < 1) {
+      addToast('Enter a current meal demand of at least one meal.', 'error');
+      return;
+    }
+    if (reqs.foodTypes.length === 0) {
+      addToast('Select at least one food type to accept and request.', 'error');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const response = await updateMyRecipientRequirements({
+        capacityMeals,
+        requestedMeals,
+        foodTypes: reqs.foodTypes
+      });
+      if (!response.success) {
+        throw new Error(response.message || 'Could not save recipient requirements.');
+      }
+      addToast('Recipient matching requirements saved.', 'success');
+      setError('');
+    } catch (saveError) {
+      addToast(saveError.message || 'Could not save recipient requirements.', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '28px', maxWidth: '600px' }}>
       <div>
         <h2 style={{ fontSize: '24px', fontWeight: '900' }}>Organization Requirements & Capabilities</h2>
-        <p style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>Configure your recipient shelter capacity for automated matching.</p>
+        <p style={{ fontSize: '14px', color: 'var(--text-secondary)' }}>Set the recipient demand, meal capacity, and food types used by automated matching.</p>
       </div>
-
       <div style={{ background: '#FFFFFF', padding: '32px', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border-color)', boxShadow: 'var(--shadow-card)' }}>
-        <form onSubmit={e => { e.preventDefault(); addToast('Requirements saved successfully!', 'success'); }} style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-          <div>
-            <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', marginBottom: '6px' }}>Max Daily Receiving Capacity (Meals)</label>
-            <input type="number" value={reqs.capacity} onChange={e => setReqs({...reqs, capacity: e.target.value})} style={{ width: '100%', padding: '12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }} />
-          </div>
-          <div>
-            <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', marginBottom: '6px' }}>Max Travel Distance (km)</label>
-            <input type="number" value={reqs.maxDistance} onChange={e => setReqs({...reqs, maxDistance: e.target.value})} style={{ width: '100%', padding: '12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }} />
-          </div>
-          <div>
-            <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', marginBottom: '6px' }}>Preferred Food Categories</label>
-            <input type="text" value={reqs.categories} onChange={e => setReqs({...reqs, categories: e.target.value})} style={{ width: '100%', padding: '12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }} />
-          </div>
-          <button type="submit" style={{ background: 'var(--primary-green)', color: '#fff', border: 'none', padding: '14px', borderRadius: 'var(--radius-sm)', fontWeight: '700', cursor: 'pointer' }}>
-            Save Requirements
-          </button>
-        </form>
+        {loading ? <p>Loading saved requirements…</p> : (
+          <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+            {error && <p role="alert" style={{ color: 'var(--critical-red)' }}>{error}</p>}
+            <div>
+              <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', marginBottom: '6px' }}>Max Daily Receiving Capacity (Meals)</label>
+              <input type="number" min="1" step="1" value={reqs.capacityMeals} onChange={e => setReqs({...reqs, capacityMeals: e.target.value})} style={{ width: '100%', padding: '12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }} disabled={saving} />
+            </div>
+            <div>
+              <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', marginBottom: '6px' }}>Current Meal Demand</label>
+              <input type="number" min="1" step="1" value={reqs.requestedMeals} onChange={e => setReqs({...reqs, requestedMeals: e.target.value})} style={{ width: '100%', padding: '12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }} disabled={saving} />
+            </div>
+            <div>
+              <label style={{ display: 'block', fontSize: '12px', fontWeight: '700', marginBottom: '6px' }}>Food types accepted and currently requested</label>
+              <select multiple size={foodTypeOptions.length} value={reqs.foodTypes} onChange={(event) => setReqs({ ...reqs, foodTypes: Array.from(event.target.selectedOptions, option => option.value) })} style={{ width: '100%', padding: '12px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)' }} disabled={saving}>
+                {foodTypeOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+              <p style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '6px' }}>Use Ctrl-click to select more than one food type.</p>
+            </div>
+            <button type="submit" disabled={saving} style={{ background: 'var(--primary-green)', color: '#fff', border: 'none', padding: '14px', borderRadius: 'var(--radius-sm)', fontWeight: '700', cursor: saving ? 'wait' : 'pointer' }}>
+              {saving ? 'Saving…' : 'Save Requirements'}
+            </button>
+          </form>
+        )}
       </div>
     </div>
   );
@@ -3324,6 +3445,66 @@ export function DonationsPage({ appData, setAppData, addToast, navigate }) {
   const [notes, setNotes] = useState('');
   const [loadingOptions, setLoadingOptions] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [refreshingDonations, setRefreshingDonations] = useState(false);
+
+  async function refreshDonations() {
+    setRefreshingDonations(true);
+    try {
+      const response = await getDonations();
+      const donations = (response.data || []).map(donation => ({
+        id: donation._id,
+        provider: donation.food?.providerName || 'Unknown provider',
+        recipient: donation.recipient?.name || 'Unknown recipient',
+        items: donation.food?.foodName || 'Unknown food',
+        quantity: `${donation.quantity} ${donation.food?.unit || ''}`.trim(),
+        date: donation.requestedAt
+          ? new Date(donation.requestedAt).toLocaleString()
+          : '—',
+        status: donation.status,
+        deliveryStatus: donation.status,
+        notes: donation.notes || '',
+      }));
+      setAppData(previous => ({ ...previous, donations }));
+    } catch (error) {
+      addToast(`Could not refresh donations: ${error.message}`, 'error');
+    } finally {
+      setRefreshingDonations(false);
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadDonationsOnEntry() {
+      try {
+        const response = await getDonations();
+        if (cancelled) return;
+        const donations = (response.data || []).map(donation => ({
+          id: donation._id,
+          provider: donation.food?.providerName || 'Unknown provider',
+          recipient: donation.recipient?.name || 'Unknown recipient',
+          items: donation.food?.foodName || 'Unknown food',
+          quantity: `${donation.quantity} ${donation.food?.unit || ''}`.trim(),
+          date: donation.requestedAt
+            ? new Date(donation.requestedAt).toLocaleString()
+            : '—',
+          status: donation.status,
+          deliveryStatus: donation.status,
+          notes: donation.notes || '',
+        }));
+        setAppData(previous => ({ ...previous, donations }));
+      } catch (error) {
+        if (!cancelled) {
+          console.error('Could not load donations on page entry:', error);
+        }
+      }
+    }
+
+    loadDonationsOnEntry();
+    return () => {
+      cancelled = true;
+    };
+  }, [setAppData]);
 
   useEffect(() => {
     let cancelled = false;
@@ -3558,9 +3739,14 @@ export function DonationsPage({ appData, setAppData, addToast, navigate }) {
           overflowX: 'auto',
         }}
       >
-        <h3 style={{ fontSize: '18px', fontWeight: '800', marginTop: 0 }}>
-          Existing Donations
-        </h3>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px' }}>
+          <h3 style={{ fontSize: '18px', fontWeight: '800', marginTop: 0 }}>
+            Existing Donations
+          </h3>
+          <button type="button" onClick={refreshDonations} disabled={refreshingDonations}>
+            {refreshingDonations ? 'Refreshing...' : 'Refresh'}
+          </button>
+        </div>
 
         <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left' }}>
           <thead>
@@ -3604,6 +3790,7 @@ export function DonationsPage({ appData, setAppData, addToast, navigate }) {
 export function DonationDetailView({
   appData,
   setAppData,
+  currentUser,
   currentRoute,
   navigate,
   addToast,
@@ -3611,6 +3798,7 @@ export function DonationDetailView({
   const id = currentRoute.split('/')[2];
   const donation = appData.donations.find(d => d.id === id);
   const [updatingStatus, setUpdatingStatus] = useState(false);
+  const [dispatching, setDispatching] = useState(false);
 
   if (!donation) {
     return (
@@ -3636,13 +3824,15 @@ export function DonationDetailView({
   }
 
   const status = String(donation.status || 'pending').toLowerCase();
+  const assignedDelivery = (appData.deliveries || []).find(
+    delivery => String(delivery.donationId) === String(id)
+  );
+  const canManagePreparation = currentUser?.role === 'provider';
 
-  const nextStatus = {
+  const nextStatus = canManagePreparation ? ({
     pending: { value: 'accepted', label: 'Accept Donation' },
     accepted: { value: 'preparing', label: 'Start Preparation' },
-    preparing: { value: 'picked_up', label: 'Mark Picked Up' },
-    picked_up: { value: 'delivered', label: 'Mark Delivered' },
-  }[status];
+  })[status] : null;
 
   async function handleStatusUpdate() {
     if (!nextStatus || updatingStatus) return;
@@ -3678,6 +3868,41 @@ export function DonationDetailView({
       addToast(error.message || 'Could not update donation status.', 'error');
     } finally {
       setUpdatingStatus(false);
+    }
+  }
+
+  async function handleDispatch() {
+    if (dispatching) return;
+    setDispatching(true);
+    try {
+      const response = await dispatchPreparedDonation(id);
+      const delivery = response.data;
+      const mappedDelivery = {
+        id: String(delivery._id),
+        donationId: String(typeof delivery.donation === 'object' ? delivery.donation?._id : delivery.donation || id),
+        driver: delivery.driver?.name || 'Unassigned',
+        vehicle: delivery.driver?.vehicleType || 'Not specified',
+        status: delivery.status,
+        pickupAddress: delivery.pickupAddress,
+        deliveryAddress: delivery.deliveryAddress,
+        eta: delivery.plannedPickupAt
+          ? `Pickup: ${new Date(delivery.plannedPickupAt).toLocaleString()}`
+          : 'Not scheduled',
+      };
+      setAppData(previous => ({
+        ...previous,
+        deliveries: [
+          mappedDelivery,
+          ...(previous.deliveries || []).filter(item =>
+            item.id !== mappedDelivery.id && String(item.donationId) !== String(id)
+          ),
+        ],
+      }));
+      addToast(response.message || 'Delivery dispatch created.', delivery.driver ? 'success' : 'warning');
+    } catch (error) {
+      addToast(error.message || 'Could not create a delivery for this donation.', 'error');
+    } finally {
+      setDispatching(false);
     }
   }
 
@@ -3753,6 +3978,21 @@ export function DonationDetailView({
             {status.replaceAll('_', ' ').toUpperCase()}
           </strong>
         </p>
+        <div style={{ marginBottom: '22px', padding: '14px 16px', borderRadius: '10px', background: '#F4F8F4' }}>
+          <strong>Assigned driver: </strong>
+          {assignedDelivery?.driver && assignedDelivery.driver !== 'Unassigned'
+            ? assignedDelivery.driver
+            : 'No driver assignment is available for this donation yet.'}
+          {assignedDelivery?.id && (
+            <button
+              type="button"
+              onClick={() => navigate(`/deliveries/${assignedDelivery.id}`)}
+              style={{ marginLeft: '12px', color: 'var(--primary-green)', border: 0, background: 'transparent', fontWeight: 700, cursor: 'pointer' }}
+            >
+              View live tracking
+            </button>
+          )}
+        </div>
 {nextStatus && (
   <button
     type="button"
@@ -3773,11 +4013,29 @@ export function DonationDetailView({
   </button>
 )}
 
-{!nextStatus && (
+{!nextStatus && ['delivered', 'rejected', 'cancelled'].includes(status) && (
   <p style={{ color: 'var(--text-secondary)' }}>
     This donation has reached a final status. No further status action is available.
   </p>
 )}
+{!nextStatus && ['pending', 'accepted', 'preparing', 'picked_up'].includes(status) && (
+  <p style={{ color: 'var(--text-secondary)' }}>
+    {status === 'pending'
+      ? 'This request is waiting for the provider to accept it.'
+      : 'Donation progress is managed by the provider and assigned driver.'}
+  </p>
+)}
+{canManagePreparation && status === 'preparing' &&
+  (!assignedDelivery?.driver || assignedDelivery.driver === 'Unassigned') && (
+    <div style={{ marginBottom: '22px' }}>
+      <button type="button" onClick={handleDispatch} disabled={dispatching}>
+        {dispatching ? 'Assigning delivery...' : assignedDelivery ? 'Retry driver assignment' : 'Create delivery and assign driver'}
+      </button>
+      <p style={{ color: 'var(--text-secondary)', fontSize: '13px', marginTop: '8px' }}>
+        Creates the delivery record and assigns an available driver with enough meal capacity.
+      </p>
+    </div>
+  )}
 
         <div
           style={{
@@ -4450,7 +4708,9 @@ export function DeliveryTrackingView({ currentRoute, navigate }) {
                   {routeOriginMatchesLatest
                     ? ' This matches the latest driver location.'
                     : ' The driver has moved since this route was calculated; a refresh is pending.'}
-                  {' '}Live traffic may not be included.
+                  {route.trafficAware
+                    ? ' The configured traffic-aware routing profile was used where available.'
+                    : ' Live traffic may not be included.'}
                   {session.routeLoading ? ' Refreshing route…' : ''}
                 </p>
               </div>
@@ -4607,6 +4867,7 @@ export function AgentActivityPage({ appData, currentUser, addToast }) {
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [reviewingKey, setReviewingKey] = useState("");
+  const [resumingWorkflowId, setResumingWorkflowId] = useState("");
   const [expandedWorkflowId, setExpandedWorkflowId] = useState("");
   const [workflowDetails, setWorkflowDetails] = useState({});
   const [detailLoadingId, setDetailLoadingId] = useState("");
@@ -4751,6 +5012,19 @@ export function AgentActivityPage({ appData, currentUser, addToast }) {
       );
     } finally {
       setReviewingKey("");
+    }
+  };
+
+  const handleResumeWorkflow = async (workflowId) => {
+    setResumingWorkflowId(workflowId);
+    try {
+      const response = await resumeApprovedAgentWorkflow(workflowId);
+      addToast?.(response.message || "Workflow resumed.", "success");
+      await loadWorkflowData();
+    } catch (resumeError) {
+      addToast?.(resumeError.message || "Could not resume the workflow.", "error");
+    } finally {
+      setResumingWorkflowId("");
     }
   };
 
@@ -4931,6 +5205,19 @@ export function AgentActivityPage({ appData, currentUser, addToast }) {
                     {" · "}
                     Agents recorded: {workflow.agentRuns?.length || 0}
                   </p>
+                  {workflow.workflowStatus === "WAITING_FOR_APPROVAL" &&
+                    workflow.approvalStatus === "approved" && (
+                      <button
+                        type="button"
+                        onClick={() => handleResumeWorkflow(workflowId)}
+                        disabled={resumingWorkflowId === workflowId}
+                        style={{ marginTop: "12px" }}
+                      >
+                        {resumingWorkflowId === workflowId
+                          ? "Resuming workflow…"
+                          : "Resume approved workflow"}
+                      </button>
+                    )}
                   <button
                     type="button"
                     onClick={() => toggleWorkflowDetails(workflowId)}
@@ -5706,11 +5993,11 @@ export function AnalyticsPage() {
           value: analytics.totalMealsRedistributed.toLocaleString(),
         },
         {
-          label: "CO₂ Emissions Avoided",
+          label: "Estimated CO₂e Avoided",
           value:
-            analytics.co2EmissionsAvoidedTons == null
-              ? "Not available"
-              : `${analytics.co2EmissionsAvoidedTons} Tons`,
+            analytics.co2EmissionsAvoidedKg == null
+              ? "Needs measured weight"
+              : `${analytics.co2EmissionsAvoidedKg} kg CO₂e`,
         },
         {
           label: "Active Provider Network",
@@ -5868,6 +6155,16 @@ export function AnalyticsPage() {
             <p style={{ color: "var(--text-secondary)", fontSize: "14px" }}>
               {analytics.co2Explanation}
             </p>
+            <p style={{ marginTop: "10px", fontSize: "13px" }}>
+              <a
+                href="https://nepis.epa.gov/Exe/ZyPURL.cgi?Dockey=P10149EF.txt"
+                target="_blank"
+                rel="noreferrer"
+                style={{ color: "var(--primary-green)" }}
+              >
+                EPA WARM food donation methodology
+              </a>
+            </p>
           </div>
         </>
       )}
@@ -5913,9 +6210,13 @@ export function NotificationsPage({ setAppData, addToast }) {
     };
 
     void fetchNotifications();
+    const refreshTimer = window.setInterval(() => {
+      void loadNotifications();
+    }, 60000);
 
     return () => {
       cancelled = true;
+      window.clearInterval(refreshTimer);
     };
   }, [loadNotifications]);
 
