@@ -4,6 +4,7 @@ const Delivery = require("../models/Delivery");
 const Driver = require("../models/Driver");
 const Donation = require("../models/Donation");
 const FoodInventory = require("../models/FoodInventory");
+const { notifyRecipientOfProgress } = require("../services/deliveryProgressNotificationService");
 
 const getReplanningProposals = async (req, res) => {
   try {
@@ -26,6 +27,7 @@ const getReplanningProposals = async (req, res) => {
       const food = donation?.food;
 
       if (!donation || !food) continue;
+      if (String(food.providerOrganization || "") !== String(req.organization.id)) continue;
 
       // Do not replan donations that cannot be delivered.
       if (
@@ -108,17 +110,6 @@ const getReplanningProposals = async (req, res) => {
 
 const approveReplanningProposal = async (req, res) => {
   let claimedDriverId = null;
-
-  await Donation.updateOne(
-      {
-        _id: updatedDelivery.donation,
-        status: "pending"
-      },
-      {
-        $set: { status: "accepted" }
-      }
-    );
-    
   try {
     const { deliveryId } = req.params;
     const { driverId } = req.body;
@@ -174,6 +165,12 @@ const approveReplanningProposal = async (req, res) => {
     }
 
     const food = donation.food;
+    if (String(food.providerOrganization || "") !== String(req.organization.id)) {
+      return res.status(403).json({
+        success: false,
+        message: "This delivery does not belong to your provider account"
+      });
+    }
     const expiry = new Date(food.expiryTime);
     const quantity = Number(donation.quantity);
     const unit = String(food.unit || "").trim().toLowerCase();
@@ -268,6 +265,12 @@ const approveReplanningProposal = async (req, res) => {
       });
     }
 
+    // Reopen a pending donation so the replacement driver can continue it.
+    await Donation.updateOne(
+      { _id: updatedDelivery.donation, status: "pending" },
+      { $set: { status: "accepted" } }
+    );
+
     claimedDriverId = null;
 
     // Release the old driver only if still marked assigned.
@@ -281,6 +284,15 @@ const approveReplanningProposal = async (req, res) => {
     const result = await Delivery.findById(updatedDelivery._id)
       .populate("donation")
       .populate("driver");
+
+    try {
+      await notifyRecipientOfProgress({
+        deliveryId: updatedDelivery._id,
+        event: "assigned"
+      });
+    } catch (notificationError) {
+      console.error("Reassignment notification could not be created:", notificationError);
+    }
 
     return res.status(200).json({
       success: true,

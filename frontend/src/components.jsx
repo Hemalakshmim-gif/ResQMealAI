@@ -40,7 +40,7 @@ export function Sidebar({ currentRoute, navigate, collapsed, setCollapsed, userR
         { label: 'Logistics & Fleet', path: '/logistics', icon: Truck, roles: ['admin'] },
         { label: 'Agent Activity', path: '/agents', icon: Activity, roles: ['admin', 'provider'] },
         { label: 'Monitoring Center', path: '/monitoring', icon: Radio, roles: ['admin', 'provider'] },
-        { label: 'Replanning Center', path: '/replanning', icon: Zap, roles: ['admin'] }
+        { label: 'Replanning Center', path: '/replanning', icon: Zap, roles: ['provider'] }
       ]
     },
     {

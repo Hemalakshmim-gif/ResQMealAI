@@ -283,6 +283,7 @@ const [userRole, setUserRole] = useState(() => {
         name: food.foodName,
         category: food.foodType,
         quantity: food.quantity,
+        remainingQuantity: food.remainingQuantity ?? food.quantity,
         unit: food.unit,
         expiryTime: food.expiryTime
           ? food.expiryTime.slice(0, 16).replace('T', ' ')

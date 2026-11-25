@@ -9,6 +9,7 @@ async function apiRequest(path, options = {}) {
   const driverToken = localStorage.getItem("nourivya-driver-token");
   const isTrackingRequest = path.startsWith("/api/tracking/");
   const isAgentWorkflowRequest = path.startsWith("/api/agents/workflows");
+  const isReplanningRequest = path.startsWith("/api/replanning");
   const isDriverRequest =
     path.startsWith("/api/driver-deliveries") ||
     path === "/api/driver-auth/availability" ||
@@ -42,6 +43,7 @@ async function apiRequest(path, options = {}) {
       path.startsWith("/api/inventory") ||
       path.startsWith("/api/food-safety/reviews") ||
       isAgentWorkflowRequest ||
+      isReplanningRequest ||
       isDonationDispatchRequest ||
       isOrganizationProfileUpdate) &&
     token

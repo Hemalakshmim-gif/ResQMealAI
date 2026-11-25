@@ -2920,7 +2920,8 @@ export function RecipientDashboard({ appData, addToast, navigate }) {
       return;
     }
 
-    if (!item.id || !Number.isFinite(Number(item.quantity)) || Number(item.quantity) <= 0) {
+    const remainingQuantity = Number(item.remainingQuantity ?? item.quantity);
+    if (!item.id || !Number.isFinite(remainingQuantity) || remainingQuantity <= 0) {
       addToast('This food listing has invalid information.', 'error');
       return;
     }
@@ -2931,7 +2932,7 @@ export function RecipientDashboard({ appData, addToast, navigate }) {
       const result = await createDonation({
         food: item.id,
         recipient: organizationId,
-        quantity: Number(item.quantity),
+        quantity: remainingQuantity,
         notes: 'Requested through the Recipient Dashboard',
       });
 
@@ -2957,6 +2958,7 @@ const availableItems = appData.inventory.filter((item) => {
 
   return (
     item.donationStatus === 'Available' &&
+    Number(item.remainingQuantity ?? item.quantity) > 0 &&
     safety?.canBeRecommended === true &&
     safety?.eligibilityStatus === 'approved'
   );
@@ -3050,7 +3052,7 @@ const availableItems = appData.inventory.filter((item) => {
               </h3>
 
               <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
-                Quantity: <strong>{item.quantity} {item.unit}</strong>
+                Remaining: <strong>{item.remainingQuantity ?? item.quantity} {item.unit}</strong>
               </p>
 
               <p style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '20px' }}>

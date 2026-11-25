@@ -1,6 +1,7 @@
 
 const mongoose = require("mongoose");
 const FoodInventory = require("../models/FoodInventory");
+const Donation = require("../models/Donation");
 const Organization = require("../models/Organization");
 
 // Validate expiry when food is marked as available.
@@ -84,14 +85,29 @@ const createFood = async (req, res) => {
 // READ ALL: Get all food listings
 const getAllFood = async (req, res) => {
   try {
-    const foods = await FoodInventory.find().sort({
-      createdAt: -1
+    const [foods, allocations] = await Promise.all([
+      FoodInventory.find().sort({ createdAt: -1 }),
+      Donation.aggregate([
+        { $match: { status: { $nin: ["rejected", "cancelled"] } } },
+        { $group: { _id: "$food", totalAllocated: { $sum: "$quantity" } } }
+      ])
+    ]);
+    const allocatedByFoodId = new Map(
+      allocations.map((allocation) => [String(allocation._id), allocation.totalAllocated])
+    );
+    const foodsWithRemainingQuantity = foods.map((food) => {
+      const foodData = food.toObject();
+      const alreadyAllocated = allocatedByFoodId.get(String(food._id)) || 0;
+      return {
+        ...foodData,
+        remainingQuantity: Math.max(0, Number(food.quantity) - alreadyAllocated)
+      };
     });
 
     return res.status(200).json({
       success: true,
-      count: foods.length,
-      data: foods
+      count: foodsWithRemainingQuantity.length,
+      data: foodsWithRemainingQuantity
     });
   } catch (error) {
     return res.status(500).json({
